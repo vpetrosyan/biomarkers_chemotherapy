@@ -1,0 +1,711 @@
+---
+title: "CTD_models"
+output: html_document
+---
+
+```{r libraries}
+library(tidyverse)
+library(ggplot2)
+library(kableExtra)
+library(gplots)
+library(reshape2)
+library(plyr)
+library(stringr)
+library(dplyr)
+library(tidyr)
+library(ModelMetrics)
+library(rsm)
+library(pROC)
+library(plotROC)
+library(pROC)
+library(WGCNA)
+library(caret)
+library(xgboost)
+library(biomaRt)
+library(caret)
+multiplot <- function(..., plotlist = NULL, file, cols = 1, layout = NULL) {
+  require(grid)
+  
+  plots <- c(list(...), plotlist)
+  
+  numPlots = length(plots)
+  
+  if (is.null(layout)) {
+    layout <- matrix(seq(1, cols * ceiling(numPlots/cols)),
+                     ncol = cols, nrow = ceiling(numPlots/cols))
+  }
+  
+  if (numPlots == 1) {
+    print(plots[[1]])
+    
+  } else {
+    grid.newpage()
+    pushViewport(viewport(layout = grid.layout(nrow(layout), ncol(layout))))
+    
+    for (i in 1:numPlots) {
+      matchidx <- as.data.frame(which(layout == i, arr.ind = TRUE))
+      
+      print(plots[[i]], vp = viewport(layout.pos.row = matchidx$row,
+                                      layout.pos.col = matchidx$col))
+    }
+  }
+}
+```
+
+```{r load the response and expression data}
+response = read.table("input/pdx_cohort_response.txt", header = TRUE)
+response$xeno = gsub("-","_",response$xeno)
+pdx_response = as.character(unique(response$xeno))
+
+#Read in the RNA-seq data (Murine and Human)
+#log2(1000 * Upper Quartile normalized counts + 1).
+xenome_human_RSEM = read.csv("input/PDX_RNAseq_UQCounts_log2_Human.csv",header = TRUE)
+rownames(xenome_human_RSEM) = xenome_human_RSEM$X
+xenome_mouse_RSEM = read.csv("input/PDX_RNAseq_UQCounts_log2_Mouse.csv")
+rownames(xenome_mouse_RSEM) = xenome_mouse_RSEM$X
+
+#Keep only the PDXs with response 
+xenome_human_RSEM = xenome_human_RSEM[,colnames(xenome_human_RSEM) %in% pdx_response]
+xenome_human_RSEM = data.frame(t(xenome_human_RSEM))
+xenome_mouse_RSEM = xenome_mouse_RSEM[,colnames(xenome_mouse_RSEM) %in% pdx_response]
+xenome_mouse_RSEM = data.frame(t(xenome_mouse_RSEM))
+```
+
+
+```{r make the response dfs}
+response_qual = response
+response_qual = response_qual[,c(1,2,7)]
+response = response[,c(1,2,4)]
+
+#Subset the response table 
+doc20_carbo_quant = response[response$tx == "Doc20+Carbo",]
+carbo_quant = response[response$tx == "Carbo",]
+doc20_quant = response[response$tx == "Doc20",]
+doc30_quant = response[response$tx == "Doc30",]
+
+doc20_doc30 = merge(doc30_quant,doc20_quant,by = "xeno", all = TRUE)
+doc20_doc30$best_response <- ifelse(is.na(doc20_doc30$logfc_estimate.x), doc20_doc30$logfc_estimate.y, with(doc20_doc30, pmin(logfc_estimate.x, logfc_estimate.y)))
+doc20_doc30 = doc20_doc30[,c(1,6)]
+```
+
+
+```{r info genes only}
+carbo_ep_info_genes = read.table("input/info_genes_carboep.txt")
+carbo_ep_info_genes = as.character(carbo_ep_info_genes$x)
+doc20_ep_info_genes = read.table("input/info_genes_doc20ep.txt")
+doc20_ep_info_genes = as.character(doc20_ep_info_genes$x)
+
+carbo_stromal_info_genes = read.table("input/info_genes_carbostromal.txt")
+carbo_stromal_info_genes = as.character(carbo_stromal_info_genes$x)
+#remove "E130307A14RIK" as it has no human homolog
+carbo_stromal_info_genes = carbo_stromal_info_genes[!carbo_stromal_info_genes %in%  "E130307A14RIK"]
+
+doc20_stromal_info_genes = read.table("input/info_genes_doc20stromal.txt")
+doc20_stromal_info_genes = as.character(doc20_stromal_info_genes$x)
+```
+
+```{r pseudo-bulk over just these genes}
+info_genes_all = c(carbo_ep_info_genes,doc20_ep_info_genes,carbo_stromal_info_genes,doc20_stromal_info_genes)
+xenome_human_RSEM = xenome_human_RSEM[,colnames(xenome_human_RSEM) %in% info_genes_all]
+xenome_human_RSEM$pdx = rownames(xenome_human_RSEM)
+xenome_human_RSEM_melt = melt(xenome_human_RSEM)
+#15/15
+colnames(xenome_mouse_RSEM) = toupper(colnames(xenome_mouse_RSEM))
+xenome_mouse_RSEM = xenome_mouse_RSEM[,colnames(xenome_mouse_RSEM) %in% info_genes_all]
+xenome_mouse_RSEM$pdx = rownames(xenome_mouse_RSEM)
+xenome_mouse_RSEM_melt = melt(xenome_mouse_RSEM)
+
+xenome_human_mouse_RSEM_melt = rbind(xenome_human_RSEM_melt,xenome_mouse_RSEM_melt)
+
+xenome_human_mouse_RSEM_melt = aggregate(. ~pdx+variable, data=xenome_human_mouse_RSEM_melt, sum, na.rm=TRUE)
+xenome_human_mouse_RSEM = recast(xenome_human_mouse_RSEM_melt, pdx ~ variable)
+rownames(xenome_human_mouse_RSEM) = xenome_human_mouse_RSEM$pdx
+xenome_human_mouse_RSEM$pdx = NULL 
+```
+
+
+```{r diff response}
+#Start with getting the diffrential expression score for each PDX 
+carbo_quant_score = carbo_quant
+colnames(carbo_quant_score)[3] = "Carbo_logfc_estimate"
+carbo_quant_score$tx = NULL
+
+doc20_quant_score = doc20_quant
+colnames(doc20_quant_score)[3] = "Doc20_logfc_estimate"
+doc20_quant_score$tx = NULL
+
+doc20_carbo_quant_score = doc20_carbo_quant
+colnames(doc20_carbo_quant_score)[3] = "response"
+doc20_carbo_quant_score$tx = NULL
+
+doc20_quant_score = doc20_quant
+colnames(doc20_quant_score)[3] = "Doc20_logfc_estimate"
+doc20_quant_score$tx = NULL
+
+
+carbo_qual = response_qual[response_qual$tx == "Carbo",]
+doc20_qual = response_qual[response_qual$tx == "Doc20",]
+doc20_carbo_qual = response_qual[response_qual$tx == "Doc20+Carbo",]
+
+doc20_doc30_qual = response_qual[response_qual$tx == "Doc20"|response_qual$tx == "Doc30",]
+doc20_doc30_qual = recast(doc20_doc30_qual, xeno ~ tx,)
+doc20_doc30_qual$Doc20 = factor(doc20_doc30_qual$Doc20 , levels = c("CR","PR","SD","PD"), ordered = TRUE)
+doc20_doc30_qual$Doc30 = factor(doc20_doc30_qual$Doc30 , levels = c("CR","PR","SD","PD"), ordered = TRUE)
+doc20_doc30_qual$best_response = with(doc20_doc30_qual, pmin(Doc20, Doc30))
+doc20_doc30_qual$best_response <- ifelse(is.na(doc20_doc30_qual$Doc30), as.character(doc20_doc30_qual$Doc20), as.character(with(doc20_doc30_qual, pmin(Doc20, Doc30))))
+
+
+carbo_qual_score = carbo_qual
+colnames(carbo_qual_score)[3] = "Carbo_qual"
+carbo_qual_score$tx = NULL
+
+doc20_qual_score = doc20_qual
+colnames(doc20_qual_score)[3] = "Doc20_qual"
+doc20_qual_score$tx = NULL
+
+doc20_carbo_qual_score = doc20_carbo_qual
+colnames(doc20_carbo_qual_score)[3] = "Doc20 + Carbo_qual"
+doc20_carbo_qual_score$tx = NULL
+
+
+#Can we predict these scores?
+xenome_human_mouse_RSEM$xeno = rownames(xenome_human_mouse_RSEM)
+score_df_all_carbo = merge(xenome_human_mouse_RSEM,carbo_quant_score, by = "xeno")
+rownames(score_df_all_carbo) = score_df_all_carbo$xeno
+score_df_all_carbo$xeno = NULL
+score_df_all_carbo = score_df_all_carbo[,c(carbo_ep_info_genes,carbo_stromal_info_genes,"Carbo_logfc_estimate")]
+colnames(score_df_all_carbo)[10] = "response"
+
+score_df_all_carbo_qual = merge(xenome_human_mouse_RSEM,carbo_qual_score, by = "xeno")
+rownames(score_df_all_carbo_qual) = score_df_all_carbo_qual$xeno
+score_df_all_carbo_qual$xeno = NULL
+score_df_all_carbo_qual = score_df_all_carbo_qual[,c(carbo_ep_info_genes,carbo_stromal_info_genes,"Carbo_qual")]
+colnames(score_df_all_carbo_qual)[10] = "response"
+
+score_df_all_doc20 = merge(xenome_human_mouse_RSEM,doc20_quant_score, by = "xeno")
+rownames(score_df_all_doc20) = score_df_all_doc20$xeno
+score_df_all_doc20$xeno = NULL
+score_df_all_doc20 = score_df_all_doc20[,c(doc20_ep_info_genes,doc20_stromal_info_genes,"Doc20_logfc_estimate")]
+colnames(score_df_all_doc20)[7] = "response"
+
+score_df_all_doc20_qual = merge(xenome_human_mouse_RSEM,doc20_qual_score, by = "xeno")
+rownames(score_df_all_doc20_qual) = score_df_all_doc20_qual$xeno
+score_df_all_doc20_qual$xeno = NULL
+score_df_all_doc20_qual = score_df_all_doc20_qual[,c(doc20_ep_info_genes,doc20_stromal_info_genes,"Doc20_qual")]
+colnames(score_df_all_doc20_qual)[7] = "response"
+
+score_df_all_doc20_carbo = merge(xenome_human_mouse_RSEM,doc20_carbo_quant_score, by = "xeno")
+rownames(score_df_all_doc20_carbo) = score_df_all_doc20_carbo$xeno
+score_df_all_doc20_carbo$xeno = NULL
+
+score_df_all_doc20_carbo_qual = merge(xenome_human_mouse_RSEM,doc20_carbo_qual, by = "xeno")
+rownames(score_df_all_doc20_carbo_qual) = score_df_all_doc20_carbo_qual$xeno
+score_df_all_doc20_carbo_qual$xeno = NULL
+colnames(score_df_all_doc20_carbo_qual)[16] = "response"
+
+score_df_all_doc20_doc30 = merge(xenome_human_mouse_RSEM,doc20_doc30, by = "xeno")
+rownames(score_df_all_doc20_doc30) = score_df_all_doc20_doc30$xeno
+score_df_all_doc20_doc30$xeno = NULL
+score_df_all_doc20_doc30_all = score_df_all_doc20_doc30
+score_df_all_doc20_doc30 = score_df_all_doc20_doc30[,c(doc20_ep_info_genes,doc20_stromal_info_genes,"best_response")]
+
+score_df_all_doc20_doc30_qual = merge(xenome_human_mouse_RSEM,doc20_doc30_qual[c(1,4)], by = "xeno")
+rownames(score_df_all_doc20_doc30_qual) = score_df_all_doc20_doc30_qual$xeno
+score_df_all_doc20_doc30_qual$xeno = NULL
+score_df_all_doc20_doc30_qual = score_df_all_doc20_doc30_qual[,c(doc20_ep_info_genes,doc20_stromal_info_genes,"best_response")]
+colnames(score_df_all_doc20_doc30_qual)[7] = "response"
+
+```
+
+
+```{r models carbo p_bulk }
+split_10_carbo = read.table ("input/split_10_carbo_quant.txt",sep = "\t")
+
+carbo_glm = list()
+carbo_pred = list()
+carbo_RMSE = list()
+carbo_MAE = list()
+carbo_plot = list()
+
+for (i in 1:10){
+  split = split_10_carbo[,i]
+  score_df_all_carbo_train = score_df_all_carbo[split,]
+  score_df_all_carbo_test = score_df_all_carbo[-split,]
+  glm_model = glm(response ~ ., data = score_df_all_carbo_train,maxit = 500)
+  carbo_glm[[i]] = glm
+  predictions <- glm_model %>% predict(score_df_all_carbo_test, type = "response")
+  df_pred_obs = cbind(predictions,score_df_all_carbo_test$response)
+  df_pred_obs = data.frame(df_pred_obs)
+  carbo_pred[[i]] = df_pred_obs
+  RMSE = rmse(predictions,score_df_all_carbo_test$response)
+  carbo_RMSE[[i]] = RMSE
+  print(RMSE)
+  MAE = MAE(predictions,score_df_all_carbo_test$response)
+  carbo_MAE[[i]] = MAE
+  df_pred_obs = cbind(predictions,score_df_all_carbo_test$response)
+  df_pred_obs = data.frame(df_pred_obs)
+  colnames(df_pred_obs)[2] = "obs"
+  carbo_plot[[i]] = ggplot(df_pred_obs, aes(x = obs,y = predictions)) + geom_point() + geom_abline(intercept = 0, slope = 1)}
+
+save(carbo_MAE, file = "carbo_MAE.RData")
+save(carbo_RMSE, file = "carbo_RMSE.RData")
+```
+  
+```{r models doc20 p_bulk }
+split_10_doc20  = read.table("input/split_10_doc20_quant.txt",sep = "\t")
+
+doc20_glm = list()
+doc20_pred = list()
+doc20_RMSE = list()
+doc20_MAE = list()
+doc20_plot = list()
+
+for (i in 1:10){
+  split = split_10_doc20[,i]
+  score_df_all_doc20_train = score_df_all_doc20[split,]
+  score_df_all_doc20_test = score_df_all_doc20[-split,]
+  glm_model = glm(response ~ ., data = score_df_all_doc20_train,maxit = 500)
+  doc20_glm[[i]] = glm
+  predictions <- glm_model %>% predict(score_df_all_doc20_test, type = "response")
+  df_pred_obs = cbind(predictions,score_df_all_doc20_test$response)
+  df_pred_obs = data.frame(df_pred_obs)
+  doc20_pred[[i]] = df_pred_obs
+  RMSE = RMSE(predictions,score_df_all_doc20_test$response)
+  doc20_RMSE[[i]] = RMSE
+  print(RMSE)
+  MAE = MAE(predictions,score_df_all_doc20_test$response)
+  doc20_MAE[[i]] = MAE
+  df_pred_obs = cbind(predictions,score_df_all_doc20_test$response)
+  df_pred_obs = data.frame(df_pred_obs)
+  colnames(df_pred_obs)[2] = "obs"
+   doc20_plot[[i]] = ggplot(df_pred_obs, aes(x = obs,y = predictions)) + geom_point()+ geom_abline(intercept = 0, slope = 1)}
+
+save(doc20_MAE, file = "doc_MAE.RData")
+save(doc20_RMSE, file = "doc_RMSE.RData")
+
+```
+
+
+###Qualitative 
+
+```{r LOOCV BCM PDX quant and binary carbo }
+responsive = c("PR","CR")
+resistant = c("SD","PD")
+
+score_df_all_carbo_qual_CR_PR = score_df_all_carbo_qual
+score_df_all_carbo_qual_CR_PR$response = as.character(score_df_all_carbo_qual_CR_PR$response)
+score_df_all_carbo_qual_CR_PR$response[score_df_all_carbo_qual_CR_PR$response %in%  responsive] <- "responsive" 
+score_df_all_carbo_qual_CR_PR$response[score_df_all_carbo_qual_CR_PR$response %in%  resistant] <- "resistant" 
+score_df_all_carbo_qual_CR_PR$response = factor(score_df_all_carbo_qual_CR_PR$response)
+score_df_all_carbo_qual_CR_PR$response = relevel(score_df_all_carbo_qual_CR_PR$response,"responsive")
+
+score_df_all_carbo_qual_CR = score_df_all_carbo_qual
+score_df_all_carbo_qual_CR$response = as.character(score_df_all_carbo_qual_CR$response)
+score_df_all_carbo_qual_CR$response[score_df_all_carbo_qual_CR$response  == "CR"] <- "responsive" 
+score_df_all_carbo_qual_CR$response[score_df_all_carbo_qual_CR$response != "responsive" ] <- "resistant" 
+score_df_all_carbo_qual_CR$response = factor(score_df_all_carbo_qual_CR$response)
+score_df_all_carbo_qual_CR$response = relevel(score_df_all_carbo_qual_CR$response,"responsive")
+
+
+trainControl_LOOCV <- trainControl(
+  method = "LOOCV")
+
+fit_carbo <- train(response ~ .,  
+  data = score_df_all_carbo,
+  trControl = trainControl_LOOCV,
+  method = "glm")
+
+fit_carbo_pred = fit_carbo$pred
+fit_carbo_pred = fit_carbo_pred[,1:2]
+carbo_qual = response_qual[response_qual$tx == "Carbo",]
+fit_carbo_pred$xeno = rownames(fit_carbo_pred)
+fit_carbo_pred_qual = merge(fit_carbo_pred,carbo_qual,by = "xeno")
+colnames(fit_carbo_pred_qual)[5] = "obs_qual"
+
+fit_carbo_pred_qual$obs_CRPR = fit_carbo_pred_qual$obs_qual
+fit_carbo_pred_qual$obs_CRPR = as.character(fit_carbo_pred_qual$obs_CRPR)
+fit_carbo_pred_qual$obs_CRPR[fit_carbo_pred_qual$obs_CRPR %in% responsive] <- "responsive"
+fit_carbo_pred_qual$obs_CRPR[fit_carbo_pred_qual$obs_CRPR %in% resistant] <- "resistant"
+
+fit_carbo_pred_qual$obs_CR = fit_carbo_pred_qual$obs_qual
+fit_carbo_pred_qual$obs_CR = as.character(fit_carbo_pred_qual$obs_CR)
+fit_carbo_pred_qual$obs_CR[fit_carbo_pred_qual$obs_CR  == "CR"] <- "responsive"
+fit_carbo_pred_qual$obs_CR[fit_carbo_pred_qual$obs_CR  != "responsive"] <- "resistant"
+fit_carbo_pred_qual$tx  = NULL
+fit_carbo_pred_quant_qual_recode = fit_carbo_pred_qual
+fit_carbo_pred_quant_qual_recode[fit_carbo_pred_quant_qual_recode == "responsive"] <-0 
+fit_carbo_pred_quant_qual_recode[fit_carbo_pred_quant_qual_recode == "resistant"] <- 1
+fit_carbo_pred_quant_qual_recode$obs_CRPR = as.integer(fit_carbo_pred_quant_qual_recode$obs_CRPR)
+fit_carbo_pred_quant_qual_recode$obs_CR = as.integer(fit_carbo_pred_quant_qual_recode$obs_CR)
+colnames(fit_carbo_pred_quant_qual_recode)[2] = "quant_pred"
+#write.table(fit_carbo_pred_quant_qual_recode,"fit_carbo_pred_quant_qual_recode.txt",sep = "\t")
+
+roc_test_quant_CRPR = roc(fit_carbo_pred_quant_qual_recode$obs_CRPR,fit_carbo_pred_quant_qual_recode$quant_pred)
+
+roc_test_quant_CR = roc(fit_carbo_pred_quant_qual_recode$obs_CR,fit_carbo_pred_quant_qual_recode$quant_pred)
+
+fit_carbo_pred_quant_qual_melt_CRPR <- fit_carbo_pred_quant_qual_recode[,c(5,2)]
+fit_carbo_pred_quant_qual_melt_CRPR$name = "Carboplatin" 
+colnames(fit_carbo_pred_quant_qual_melt_CRPR)[1:2] = c("D","M") 
+
+
+fit_carbo_pred_quant_qual_melt_CR <- fit_carbo_pred_quant_qual_recode[,c(6,2)]
+fit_carbo_pred_quant_qual_melt_CR$name = "Carboplatin" 
+colnames(fit_carbo_pred_quant_qual_melt_CR)[1:2] = c("D","M") 
+
+```
+
+
+
+```{r heatmaps}
+score_df_all_carbo_heatmap = score_df_all_carbo
+#order by response
+score_df_all_carbo_heatmap = score_df_all_carbo_heatmap[order(score_df_all_carbo_heatmap$response),]
+score_df_all_carbo_heatmap = as.matrix(score_df_all_carbo_heatmap[,1:9])
+score_df_all_carbo_heatmap = t(score_df_all_carbo_heatmap)
+
+
+#Order by the coefficents 
+genes_co_carbo = fit_carbo$finalModel$coefficients
+genes_co_carbo = data.frame(genes_co_carbo)
+genes_co_carbo = genes_co_carbo[-1,,drop = FALSE]
+genes_co_carbo = genes_co_carbo[order(genes_co_carbo$genes_co_carbo),,drop = FALSE]
+genes_co_carbo = rownames(genes_co_carbo)
+genes_co_carbo = rev(genes_co_carbo)
+score_df_all_carbo_heatmap = score_df_all_carbo_heatmap[genes_co_carbo,]
+
+#score_df_all_carbo_heatmap = t(score_df_all_carbo_heatmap)
+rowmed_carbo <- apply(score_df_all_carbo_heatmap,1,median)
+score_df_all_carbo_heatmap_median = score_df_all_carbo_heatmap - rowmed_carbo
+
+
+pdf("carbo_heatmap_median_bwr.pdf")
+heatmap.2(score_df_all_carbo_heatmap_median,scale="none",Colv = NA,Rowv = NA,trace = "none", dendrogram = "none",col=colorRampPalette(colors = c("blue", "white", "red")),key = TRUE,keysize = 1)
+dev.off()
+
+score_df_all_doc20_heatmap = score_df_all_doc20
+#order by response
+score_df_all_doc20_heatmap = score_df_all_doc20_heatmap[order(score_df_all_doc20_heatmap$response),]
+score_df_all_doc20_heatmap = as.matrix(score_df_all_doc20_heatmap[,1:6])
+score_df_all_doc20_heatmap = t(score_df_all_doc20_heatmap)
+
+
+
+#Order by the coefficents 
+genes_co_doc20 = fit_doc20$finalModel$coefficients
+genes_co_doc20 = data.frame(genes_co_doc20)
+genes_co_doc20 = genes_co_doc20[-1,,drop = FALSE]
+genes_co_doc20 = genes_co_doc20[order(genes_co_doc20$genes_co_doc20),,drop = FALSE]
+genes_co_doc20 = rownames(genes_co_doc20)
+genes_co_doc20 = rev(genes_co_doc20)
+score_df_all_doc20_heatmap = score_df_all_doc20_heatmap[genes_co_doc20,]
+
+score_df_all_doc20_heatmap = t(score_df_all_doc20_heatmap)
+
+
+score_df_all_doc20_heatmap = t(score_df_all_doc20_heatmap)
+rowmed_doc20 <- apply(score_df_all_doc20_heatmap,1,median)
+score_df_all_doc20_heatmap_median = score_df_all_doc20_heatmap - rowmed_doc20
+
+
+pdf("doc20_heatmap_median_bwr.pdf")
+heatmap.2(score_df_all_doc20_heatmap_median,scale="none",Colv = NA,Rowv = NA,trace = "none", dendrogram = "none",col=colorRampPalette(colors = c("blue", "white", "red")),key = TRUE,keysize = 1)
+dev.off()
+
+
+
+```
+
+
+
+```{r LOOCV BCM PDX quant and binary doc20 }
+
+score_df_all_doc20_qual_CR_PR = score_df_all_doc20_qual
+score_df_all_doc20_qual_CR_PR$response = as.character(score_df_all_doc20_qual_CR_PR$response)
+score_df_all_doc20_qual_CR_PR$response[score_df_all_doc20_qual_CR_PR$response %in%  responsive] <- "responsive" 
+score_df_all_doc20_qual_CR_PR$response[score_df_all_doc20_qual_CR_PR$response %in%  resistant] <- "resistant" 
+score_df_all_doc20_qual_CR_PR$response = factor(score_df_all_doc20_qual_CR_PR$response)
+score_df_all_doc20_qual_CR_PR$response = relevel(score_df_all_doc20_qual_CR_PR$response,"responsive")
+
+score_df_all_doc20_qual_CR = score_df_all_doc20_qual
+score_df_all_doc20_qual_CR$response = as.character(score_df_all_doc20_qual_CR$response)
+score_df_all_doc20_qual_CR$response[score_df_all_doc20_qual_CR$response  == "CR"] <- "responsive" 
+score_df_all_doc20_qual_CR$response[score_df_all_doc20_qual_CR$response != "responsive" ] <- "resistant" 
+score_df_all_doc20_qual_CR$response = factor(score_df_all_doc20_qual_CR$response)
+score_df_all_doc20_qual_CR$response = relevel(score_df_all_doc20_qual_CR$response,"responsive")
+
+
+fit_doc20 <- train(response ~ .,  
+  data = score_df_all_doc20,
+  trControl = trainControl_LOOCV,
+  method = "glm")
+
+
+fit_doc20_pred = fit_doc20$pred
+fit_doc20_pred = fit_doc20_pred[,1:2]
+doc20_qual = response_qual[response_qual$tx == "Doc20",]
+fit_doc20_pred$xeno = rownames(fit_doc20_pred)
+fit_doc20_pred_qual = merge(fit_doc20_pred,doc20_qual,by = "xeno")
+colnames(fit_doc20_pred_qual)[5] = "obs_qual"
+
+fit_doc20_pred_qual$obs_CRPR = fit_doc20_pred_qual$obs_qual
+fit_doc20_pred_qual$obs_CRPR = as.character(fit_doc20_pred_qual$obs_CRPR)
+fit_doc20_pred_qual$obs_CRPR[fit_doc20_pred_qual$obs_CRPR %in% responsive] <- "responsive"
+fit_doc20_pred_qual$obs_CRPR[fit_doc20_pred_qual$obs_CRPR %in% resistant] <- "resistant"
+
+fit_doc20_pred_qual$obs_CR = fit_doc20_pred_qual$obs_qual
+fit_doc20_pred_qual$obs_CR = as.character(fit_doc20_pred_qual$obs_CR)
+fit_doc20_pred_qual$obs_CR[fit_doc20_pred_qual$obs_CR  == "CR"] <- "responsive"
+fit_doc20_pred_qual$obs_CR[fit_doc20_pred_qual$obs_CR  != "responsive"] <- "resistant"
+fit_doc20_pred_qual$tx  = NULL
+fit_doc20_pred_quant_qual_recode = fit_doc20_pred_qual
+fit_doc20_pred_quant_qual_recode[fit_doc20_pred_quant_qual_recode == "responsive"] <-0 
+fit_doc20_pred_quant_qual_recode[fit_doc20_pred_quant_qual_recode == "resistant"] <- 1
+fit_doc20_pred_quant_qual_recode$obs_CRPR = as.integer(fit_doc20_pred_quant_qual_recode$obs_CRPR)
+fit_doc20_pred_quant_qual_recode$obs_CR = as.integer(fit_doc20_pred_quant_qual_recode$obs_CR)
+colnames(fit_doc20_pred_quant_qual_recode)[2] = "quant_pred"
+#write.table(fit_doc20_pred_quant_qual_recode,"fit_doc20_pred_quant_qual_recode.txt",sep = "\t")
+
+roc_test_quant_CRPR = roc(fit_doc20_pred_quant_qual_recode$obs_CRPR,fit_doc20_pred_quant_qual_recode$quant_pred)
+
+roc_test_quant_CR = roc(fit_doc20_pred_quant_qual_recode$obs_CR,fit_doc20_pred_quant_qual_recode$quant_pred)
+
+
+fit_doc20_pred_quant_qual_melt_CRPR <- fit_doc20_pred_quant_qual_recode[,c(5,2)]
+fit_doc20_pred_quant_qual_melt_CRPR$name = "Docetaxel" 
+colnames(fit_doc20_pred_quant_qual_melt_CRPR)[1:2] = c("D","M") 
+
+
+fit_doc20_pred_quant_qual_melt_CR <- fit_doc20_pred_quant_qual_recode[,c(6,2)]
+fit_doc20_pred_quant_qual_melt_CR$name = "Docetaxel" 
+colnames(fit_doc20_pred_quant_qual_melt_CR)[1:2] = c("D","M") 
+
+```
+
+
+```{r boxplot doc20}
+score_df_all_doc20_qual_CR_PR_melt = melt(score_df_all_doc20_qual_CR_PR)
+
+plot_list_doc20_crpr = list()
+for(gene in c(doc20_ep_info_genes,doc20_stromal_info_genes) ){
+  gene_expression = score_df_all_doc20_qual_CR_PR_melt[grep(gene,score_df_all_doc20_qual_CR_PR_melt$variable),]
+  plot_name_file = paste(gene,"Diff_Stromal.Boxplot.png")
+  plot = ggplot(gene_expression,aes(x = response , y = value, fill = response)) +geom_boxplot() + ggtitle(gene) +theme(plot.title = element_text(size=10,hjust = 0.5, face="bold")) + theme (axis.text=element_text(size=10),axis.title=element_text(size=5)) + theme (axis.text=element_text(size=10),axis.title=element_text(size=10)) + theme (legend.text=element_text(size=10),legend.title=element_text(size=10)) + ylab("Counts") 
+  plot_list_doc20_crpr[[gene]] = plot
+}
+
+pdf("plots_doc20_genes.pdf", onefile = TRUE)
+for (i in 1:length(plot_list_doc20_crpr)) {
+  plot(plot_list_doc20_crpr[[i]])
+}
+dev.off()
+
+score_df_all_doc20_qual_CR_melt = melt(score_df_all_doc20_qual_CR)
+
+plot_list_doc20_cr = list()
+for(gene in c(doc20_ep_info_genes,doc20_stromal_info_genes) ){
+  gene_expression = score_df_all_doc20_qual_CR_melt[grep(gene,score_df_all_doc20_qual_CR_melt$variable),]
+  plot_name_file = paste(gene,"Diff_Stromal.Boxplot.png")
+  plot = ggplot(gene_expression,aes(x = response , y = value, fill = response)) +geom_boxplot() + ggtitle(gene) +theme(plot.title = element_text(size=10,hjust = 0.5, face="bold")) + theme (axis.text=element_text(size=10),axis.title=element_text(size=5)) + theme (axis.text=element_text(size=10),axis.title=element_text(size=10)) + theme (legend.text=element_text(size=10),legend.title=element_text(size=10)) + ylab("Counts") 
+  plot_list_doc20_cr[[gene]] = plot
+}
+
+pdf("plots_doc20_genes_cr.pdf", onefile = TRUE)
+for (i in 1:length(plot_list_doc20_cr)) {
+  plot(plot_list_doc20_cr[[i]])
+}
+dev.off()
+
+
+```
+
+
+```{r LOOCV BCM PDX quant and binary doc20_doc30 }
+
+score_df_all_doc20_doc30_qual_CR_PR = score_df_all_doc20_doc30_qual
+score_df_all_doc20_doc30_qual_CR_PR$response = as.character(score_df_all_doc20_doc30_qual_CR_PR$response)
+score_df_all_doc20_doc30_qual_CR_PR$response[score_df_all_doc20_doc30_qual_CR_PR$response %in%  responsive] <- "responsive" 
+score_df_all_doc20_doc30_qual_CR_PR$response[score_df_all_doc20_doc30_qual_CR_PR$response %in%  resistant] <- "resistant" 
+score_df_all_doc20_doc30_qual_CR_PR$response = factor(score_df_all_doc20_doc30_qual_CR_PR$response)
+score_df_all_doc20_doc30_qual_CR_PR$response = relevel(score_df_all_doc20_doc30_qual_CR_PR$response,"responsive")
+
+score_df_all_doc20_doc30_qual_CR = score_df_all_doc20_doc30_qual
+score_df_all_doc20_doc30_qual_CR$response = as.character(score_df_all_doc20_doc30_qual_CR$response)
+score_df_all_doc20_doc30_qual_CR$response[score_df_all_doc20_doc30_qual_CR$response  == "CR"] <- "responsive" 
+score_df_all_doc20_doc30_qual_CR$response[score_df_all_doc20_doc30_qual_CR$response != "responsive" ] <- "resistant" 
+score_df_all_doc20_doc30_qual_CR$response = factor(score_df_all_doc20_doc30_qual_CR$response)
+score_df_all_doc20_doc30_qual_CR$response = relevel(score_df_all_doc20_doc30_qual_CR$response,"responsive")
+
+colnames(score_df_all_doc20_doc30)[7] = "response"
+
+
+fit_doc20_doc30 <- train(response ~ .,  
+  data = score_df_all_doc20_doc30,
+  trControl = trainControl_LOOCV,
+  method = "glm")
+
+
+fit_doc20_doc30_pred = fit_doc20_doc30$pred
+fit_doc20_doc30_pred = fit_doc20_doc30_pred[,1:2]
+fit_doc20_doc30_pred$xeno = rownames(fit_doc20_doc30_pred)
+fit_doc20_doc30_pred_qual = merge(fit_doc20_doc30_pred,doc20_doc30_qual,by = "xeno")
+colnames(fit_doc20_doc30_pred_qual)[6] = "obs_qual"
+
+fit_doc20_doc30_pred_qual$obs_CRPR = fit_doc20_doc30_pred_qual$obs_qual
+fit_doc20_doc30_pred_qual$obs_CRPR = as.character(fit_doc20_doc30_pred_qual$obs_CRPR)
+fit_doc20_doc30_pred_qual$obs_CRPR[fit_doc20_doc30_pred_qual$obs_CRPR %in% responsive] <- "responsive"
+fit_doc20_doc30_pred_qual$obs_CRPR[fit_doc20_doc30_pred_qual$obs_CRPR %in% resistant] <- "resistant"
+
+fit_doc20_doc30_pred_qual$obs_CR = fit_doc20_doc30_pred_qual$obs_qual
+fit_doc20_doc30_pred_qual$obs_CR = as.character(fit_doc20_doc30_pred_qual$obs_CR)
+fit_doc20_doc30_pred_qual$obs_CR[fit_doc20_doc30_pred_qual$obs_CR  == "CR"] <- "responsive"
+fit_doc20_doc30_pred_qual$obs_CR[fit_doc20_doc30_pred_qual$obs_CR  != "responsive"] <- "resistant"
+fit_doc20_doc30_pred_qual$tx  = NULL
+fit_doc20_doc30_pred_quant_qual_recode = fit_doc20_doc30_pred_qual
+fit_doc20_doc30_pred_quant_qual_recode[fit_doc20_doc30_pred_quant_qual_recode == "responsive"] <-0 
+fit_doc20_doc30_pred_quant_qual_recode[fit_doc20_doc30_pred_quant_qual_recode == "resistant"] <- 1
+fit_doc20_doc30_pred_quant_qual_recode$obs_CRPR = as.integer(fit_doc20_doc30_pred_quant_qual_recode$obs_CRPR)
+fit_doc20_doc30_pred_quant_qual_recode$obs_CR = as.integer(fit_doc20_doc30_pred_quant_qual_recode$obs_CR)
+colnames(fit_doc20_doc30_pred_quant_qual_recode)[2] = "quant_pred"
+
+roc_test_quant_CRPR = roc(fit_doc20_doc30_pred_quant_qual_recode$obs_CRPR,fit_doc20_doc30_pred_quant_qual_recode$quant_pred)
+
+roc_test_quant_CR = roc(fit_doc20_doc30_pred_quant_qual_recode$obs_CR,fit_doc20_doc30_pred_quant_qual_recode$quant_pred)
+
+
+fit_doc20_doc30_pred_quant_qual_melt_CRPR <- fit_doc20_doc30_pred_quant_qual_recode[,c(6,2)]
+fit_doc20_doc30_pred_quant_qual_melt_CRPR$name = "Docetaxel" 
+colnames(fit_doc20_doc30_pred_quant_qual_melt_CRPR)[1:2] = c("D","M") 
+
+
+fit_doc20_doc30_pred_quant_qual_melt_CR <- xx[,c(6,2)]
+fit_doc20_doc30_pred_quant_qual_melt_CR$name = "Docetaxel" 
+colnames(fit_doc20_doc30_pred_quant_qual_melt_CR)[1:2] = c("D","M") 
+
+
+```
+
+
+```{r boxplot doc20_doc30}
+score_df_all_doc20_doc30_qual_CR_PR_melt = melt(score_df_all_doc20_doc30_qual_CR_PR)
+
+plot_list_doc20_doc30_crpr = list()
+for(gene in c(doc20_doc30_ep_info_genes,doc20_doc30_stromal_info_genes) ){
+  gene_expression = score_df_all_doc20_doc30_qual_CR_PR_melt[grep(gene,score_df_all_doc20_doc30_qual_CR_PR_melt$variable),]
+  plot_name_file = paste(gene,"Diff_Stromal.Boxplot.png")
+  plot = ggplot(gene_expression,aes(x = response , y = value, fill = response)) +geom_boxplot() + ggtitle(gene) +theme(plot.title = element_text(size=10,hjust = 0.5, face="bold")) + theme (axis.text=element_text(size=10),axis.title=element_text(size=5)) + theme (axis.text=element_text(size=10),axis.title=element_text(size=10)) + theme (legend.text=element_text(size=10),legend.title=element_text(size=10)) + ylab("Counts") 
+  plot_list_doc20_doc30_crpr[[gene]] = plot
+}
+
+pdf("plots_doc20_doc30_genes.pdf", onefile = TRUE)
+for (i in 1:length(plot_list_doc20_doc30_crpr)) {
+  plot(plot_list_doc20_doc30_crpr[[i]])
+}
+dev.off()
+
+score_df_all_doc20_doc30_qual_CR_melt = melt(score_df_all_doc20_doc30_qual_CR)
+
+plot_list_doc20_doc30_cr = list()
+for(gene in c(doc20_doc30_ep_info_genes,doc20_doc30_stromal_info_genes) ){
+  gene_expression = score_df_all_doc20_doc30_qual_CR_melt[grep(gene,score_df_all_doc20_doc30_qual_CR_melt$variable),]
+  plot_name_file = paste(gene,"Diff_Stromal.Boxplot.png")
+  plot = ggplot(gene_expression,aes(x = response , y = value, fill = response)) +geom_boxplot() + ggtitle(gene) +theme(plot.title = element_text(size=10,hjust = 0.5, face="bold")) + theme (axis.text=element_text(size=10),axis.title=element_text(size=5)) + theme (axis.text=element_text(size=10),axis.title=element_text(size=10)) + theme (legend.text=element_text(size=10),legend.title=element_text(size=10)) + ylab("Counts") 
+  plot_list_doc20_doc30_cr[[gene]] = plot
+}
+
+pdf("plots_doc20_doc30_genes_cr.pdf", onefile = TRUE)
+for (i in 1:length(plot_list_doc20_doc30_cr)) {
+  plot(plot_list_doc20_doc30_cr[[i]])
+}
+dev.off()
+
+
+```
+
+
+```{r best response AUC}
+
+colnames(fit_doc20_pred_quant_qual_recode) [2] = "quant_doc20"
+colnames(fit_carbo_pred_quant_qual_recode) [2] = "quant_carbo"
+
+comb_pred_carbo_doc20 = merge(fit_carbo_pred_quant_qual_recode,fit_doc20_pred_quant_qual_recode[,1:2], by = "xeno")
+comb_pred_carbo_doc20$best_response = pmin(comb_pred_carbo_doc20$quant_carbo, comb_pred_carbo_doc20$quant_doc20)
+
+roc_test_comb_CRPR = roc(comb_pred_carbo_doc20$obs_CRPR,comb_pred_carbo_doc20$best_response)
+roc_test_comb_CR = roc(comb_pred_carbo_doc20$obs_CR,comb_pred_carbo_doc20$best_response)
+
+
+fit_comb_pred_quant_qual_melt_CRPR <- comb_pred_carbo_doc20[,c(5,2)]
+fit_comb_pred_quant_qual_melt_CRPR$name = "best_response" 
+colnames(fit_comb_pred_quant_qual_melt_CRPR)[1:2] = c("D","M") 
+
+
+fit_comb_pred_quant_qual_melt_CR <- comb_pred_carbo_doc20[,c(6,2)]
+fit_comb_pred_quant_qual_melt_CR$name = "best_response" 
+colnames(fit_comb_pred_quant_qual_melt_CR)[1:2] = c("D","M") 
+```
+
+
+```{r ROC curves}
+
+fit_carbo_pred_quant_qual_melt_CRPR <- melt_roc(fit_carbo_pred_quant_qual_recode, "obs_CRPR", c("quant_carbo","quant_carbo"))
+fit_carbo_pred_quant_qual_melt_CRPR = fit_carbo_pred_quant_qual_melt_CRPR[fit_carbo_pred_quant_qual_melt_CRPR$name == "quant_carbo",]
+
+fit_carbo_pred_quant_qual_melt_CR <- melt_roc(fit_carbo_pred_quant_qual_recode, "obs_CR", c("quant_carbo","quant_carbo"))
+fit_carbo_pred_quant_qual_melt_CR = fit_carbo_pred_quant_qual_melt_CR[fit_carbo_pred_quant_qual_melt_CR$name == "quant_carbo",]
+
+fit_doc20_pred_quant_qual_melt_CRPR <- melt_roc(fit_doc20_pred_quant_qual_recode, "obs_CRPR", c("quant_doc20","quant_doc20"))
+fit_doc20_pred_quant_qual_melt_CRPR = fit_doc20_pred_quant_qual_melt_CRPR[fit_doc20_pred_quant_qual_melt_CRPR$name == "quant_doc20",]
+fit_doc20_pred_quant_qual_melt_CRPR$name = "Docetaxel" 
+
+
+fit_doc20_pred_quant_qual_melt_CR <- melt_roc(fit_doc20_pred_quant_qual_recode, "obs_CR", c("quant_doc20","quant_doc20"))
+fit_doc20_pred_quant_qual_melt_CR = fit_doc20_pred_quant_qual_melt_CR[fit_doc20_pred_quant_qual_melt_CR$name == "quant_doc20",]
+fit_doc20_pred_quant_qual_melt_CR$name = "Docetaxel" 
+
+
+fit_doc20_doc30_pred_quant_qual_melt_CRPR <- melt_roc(fit_doc20_doc30_pred_quant_qual_recode, "obs_CRPR", c("quant_pred","quant_pred"))
+fit_doc20_doc30_pred_quant_qual_melt_CRPR = fit_doc20_doc30_pred_quant_qual_melt_CRPR[fit_doc20_doc30_pred_quant_qual_melt_CRPR$name == "quant_pred",]
+fit_doc20_doc30_pred_quant_qual_melt_CRPR$name = "Docetaxel" 
+
+
+fit_doc20_doc30_pred_quant_qual_melt_CR <- melt_roc(fit_doc20_doc30_pred_quant_qual_recode, "obs_CR", c("quant_pred","quant_pred"))
+fit_doc20_doc30_pred_quant_qual_melt_CR = fit_doc20_doc30_pred_quant_qual_melt_CR[fit_doc20_doc30_pred_quant_qual_melt_CR$name == "quant_pred",]
+fit_doc20_doc30_pred_quant_qual_melt_CR$name = "Docetaxel" 
+
+
+
+fit_comb_pred_quant_qual_melt_CRPR <- melt_roc(comb_pred_carbo_doc20, "obs_CRPR", c("best_response","best_response"))
+fit_comb_pred_quant_qual_melt_CRPR = fit_comb_pred_quant_qual_melt_CRPR[fit_comb_pred_quant_qual_melt_CRPR$name == "best_response",]
+fit_comb_pred_quant_qual_melt_CRPR$name = "Docetaxel + Carboplatin"
+
+fit_comb_pred_quant_qual_melt_CR <- melt_roc(comb_pred_carbo_doc20, "obs_CR", c("best_response","best_response"))
+fit_comb_pred_quant_qual_melt_CR = fit_comb_pred_quant_qual_melt_CR[fit_comb_pred_quant_qual_melt_CR$name == "best_response",]
+fit_comb_pred_quant_qual_melt_CR$name = "Docetaxel + Carboplatin"
+
+
+
+fit_CR = rbind(fit_carbo_pred_quant_qual_melt_CR, fit_doc20_pred_quant_qual_melt_CR,fit_comb_pred_quant_qual_melt_CR)
+fit_CRPR = rbind(fit_carbo_pred_quant_qual_melt_CRPR, fit_doc20_pred_quant_qual_melt_CRPR,fit_comb_pred_quant_qual_melt_CR)
+
+
+fit_CR_d2030 = rbind(fit_carbo_pred_quant_qual_melt_CR, fit_doc20_doc30_pred_quant_qual_melt_CR)
+fit_CRPR_d2030 = rbind(fit_carbo_pred_quant_qual_melt_CRPR, fit_doc20_doc30_pred_quant_qual_melt_CRPR)
+
+
+
+pdf("ROC_CR_all_d20d30.pdf")
+ggplot(fit_CR_d2030, aes(d = D, m = M, color = name)) + geom_roc(labelsize = 5) + style_roc(theme = theme_grey()) +  theme(text = element_text(size=10)) + ggtitle("ROC CR") + theme(plot.title = element_text(hjust = 0.5))
+dev.off()
+
+
+
+
+pdf("ROC_CRPR_d2030.pdf")
+ggplot(fit_CRPR_d2030, aes(d = D, m = M, color = name)) + geom_roc(labelsize = 5) + style_roc(theme = theme_grey()) +  theme(text = element_text(size=10)) + ggtitle("ROC CR PR") + theme(plot.title = element_text(hjust = 0.5))
+dev.off()
+
+
+```
+
+
