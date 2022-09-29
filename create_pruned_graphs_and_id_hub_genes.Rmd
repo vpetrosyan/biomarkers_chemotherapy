@@ -1,0 +1,481 @@
+---
+title: "WGCNA_PDX_RNASeq_response"
+output: html_document
+setwd("~/Documents/Github/chemotherapy_response_TNBC/publish")
+---
+
+
+```{r load libraries}
+library(tidyverse)
+library(ggplot2)
+library(gplots)
+library(reshape2)
+library(plyr)
+library(stringr)
+library(dplyr)
+library(tidyr)
+library(doParallel)
+library(WGCNA)
+library(R.utils)
+library(matrixStats)
+library(igraph)
+library(caret)
+library(CTD)
+```
+
+```{r read in the RNAseq/response data}
+#Read in the response data
+response_xeno = read.table("/Users/varduhipetrosyan/Documents/GitHub/chemotherapy_response_TNBC/publish/input/pdx_cohort_response.txt", header = TRUE)
+response_xeno$xeno = gsub("-","_",response_xeno$xeno)
+pdx_response = as.character(unique(response_xeno$xeno))
+
+#Read in the RNA-seq data (Murine and Human)
+#log2(1000 * Upper Quartile normalized counts + 1).
+xenome_human_RSEM = read.csv("/Users/varduhipetrosyan/Documents/GitHub/chemotherapy_response_TNBC/publish/input/PDX_RNAseq_UQCounts_log2_Human.csv",header = TRUE)
+rownames(xenome_human_RSEM) = xenome_human_RSEM$X
+xenome_mouse_RSEM = read.csv("/Users/varduhipetrosyan/Documents/GitHub/chemotherapy_response_TNBC/publish/input/PDX_RNAseq_UQCounts_log2_Mouse.csv")
+rownames(xenome_mouse_RSEM) = xenome_mouse_RSEM$X
+
+#Keep only the PDXs with response 
+xenome_human_RSEM = xenome_human_RSEM[,colnames(xenome_human_RSEM) %in% pdx_response]
+xenome_human_RSEM = data.frame(t(xenome_human_RSEM))
+xenome_mouse_RSEM = xenome_mouse_RSEM[,colnames(xenome_mouse_RSEM) %in% pdx_response]
+xenome_mouse_RSEM = data.frame(t(xenome_mouse_RSEM))
+```
+
+```{r create the response dataframes (quantitative and qualitative)}
+response_qual = response_xeno
+response_qual = response_qual[,c(1,2,7)]
+colnames(response_qual)[3] = "response_to_treatment"
+response_qual$response_to_treatment = as.character(response_qual$response_to_treatment)
+
+response_quant = response_xeno[,c(1,2,4)]
+colnames(response_quant)[3] = "response_to_treatment"
+
+#Subset the response table (quantitative)
+carbo_quant = response_quant[response_quant$tx == "Carbo",]
+carbo_quant = carbo_quant[carbo_quant$xeno %in% rownames(xenome_human_RSEM),]
+doc20_quant = response_quant[response_quant$tx == "Doc20",]
+doc20_quant = doc20_quant[doc20_quant$xeno %in% rownames(xenome_human_RSEM),]
+response_qual = response_qual[response_qual$xeno %in% rownames(xenome_human_RSEM), ]
+
+#Subset the response table (qualitative)
+responsive = c("PR","CR")
+resistant = c("SD","PD")
+carbo_qual = response_qual[response_qual$tx == "Carbo",]
+carbo_responsive_sample = carbo_qual[carbo_qual$response_to_treatment %in% responsive,] #24
+carbo_responsive_sample = carbo_responsive_sample$xeno
+carbo_resistant_sample = carbo_qual[carbo_qual$response_to_treatment %in% resistant,] #20
+carbo_resistant_sample = carbo_resistant_sample$xeno
+
+doc20_qual = response_qual[response_qual$tx == "Doc20",]
+doc20_responsive_sample = doc20_qual[doc20_qual$response_to_treatment %in% responsive,] #33
+doc20_responsive_sample = doc20_responsive_sample$xeno
+doc20_resistant_sample = doc20_qual[doc20_qual$response_to_treatment %in% resistant,] #11
+doc20_resistant_sample = doc20_resistant_sample$xeno
+```
+
+```{r preprocess}
+#Remove near zero variance genes 
+nzv_human <- nearZeroVar(xenome_human_RSEM, saveMetrics= TRUE)
+nzv_human = nzv_human[nzv_human$nzv == "TRUE",]
+nzv_human = rownames(nzv_human)
+xenome_human_RSEM = xenome_human_RSEM[,!colnames(xenome_human_RSEM) %in% nzv_human]
+
+nzv_mouse <- nearZeroVar(xenome_mouse_RSEM, saveMetrics= TRUE)
+nzv_mouse = nzv_mouse[nzv_mouse$nzv == "TRUE",]
+nzv_mouse = rownames(nzv_mouse)
+xenome_mouse_RSEM = xenome_mouse_RSEM[,!colnames(xenome_mouse_RSEM) %in% nzv_mouse]
+
+#Remove genes that are expressed in less than 20 % of the samples 
+xenome_human_RSEM = xenome_human_RSEM[,apply(xenome_human_RSEM,2,function(x) sum(x==0))<ncol(xenome_human_RSEM)*0.8]
+xenome_mouse_RSEM = xenome_mouse_RSEM[,apply(xenome_mouse_RSEM,2,function(x) sum(x==0))<ncol(xenome_mouse_RSEM)*0.8]
+
+xenome_human_RSEM = data.frame(t(xenome_human_RSEM))
+xenome_mouse_RSEM = data.frame(t(xenome_mouse_RSEM))
+
+#Remove genes with a low expression across all samples 
+xenome_human_RSEM$row_median = rowMedians(as.matrix(xenome_human_RSEM))
+xenome_human_RSEM = xenome_human_RSEM[xenome_human_RSEM$row_median >  1 ,]
+xenome_human_RSEM$row_median = NULL
+
+xenome_mouse_RSEM$row_median = rowMedians(as.matrix(xenome_mouse_RSEM))
+xenome_mouse_RSEM = xenome_mouse_RSEM[xenome_mouse_RSEM$row_median >  1,]
+xenome_mouse_RSEM$row_median = NULL
+```
+
+```{r identify most variable genes}
+#Keep only 5,000 most variable genes 
+xenome_human_RSEM = t(xenome_human_RSEM[order(apply(xenome_human_RSEM,1,mad), decreasing = T)[1:5000],])
+xenome_mouse_RSEM = t(xenome_mouse_RSEM[order(apply(xenome_mouse_RSEM,1,mad), decreasing = T)[1:5000],])
+
+#Check the gene's expression with WGCNA's goodSamplesGenes
+gsg_human = goodSamplesGenes(xenome_human_RSEM, verbose = 3);
+gsg_human$allOK
+
+gsg_mouse = goodSamplesGenes(xenome_mouse_RSEM, verbose = 3);
+gsg_mouse$allOK
+```
+
+```{r create dataframe }
+#Create data frames for all samples and just the responsive ones 
+datExpr_human = xenome_human_RSEM
+datExpr_mouse = xenome_mouse_RSEM
+datExpr_human_carbo_responsive = datExpr_human[carbo_responsive_sample,]
+datExpr_mouse_carbo_responsive = datExpr_mouse[carbo_responsive_sample,]
+datExpr_human_doc20_responsive = datExpr_human[doc20_responsive_sample,]
+datExpr_mouse_doc20_responsive = datExpr_mouse[doc20_responsive_sample,]
+
+nGenes_human = ncol(datExpr_human)
+nSamples_human = nrow(datExpr_human)
+nGenes_mouse = ncol(datExpr_mouse)
+nSamples_mouse = nrow(datExpr_mouse)
+```
+
+```{r identify threshold for each graph}
+powers = c(c(1:10), seq(from = 12, to=20, by=2))
+
+#Graphs with all samples
+#Epithelial graph all samples
+sft_ep = pickSoftThreshold(datExpr_human, powerVector = powers, verbose = 10)
+#Stromal graph all samples 
+sft_stromal = pickSoftThreshold(datExpr_mouse, powerVector = powers, verbose = 10)
+
+#Graphs with just responsive samples 
+#Carbo
+sft_carbo_ep_responsive = pickSoftThreshold(datExpr_human_carbo_responsive, powerVector = powers, verbose = 10)
+sft_carbo_stromal_responsive = pickSoftThreshold(datExpr_mouse_carbo_responsive, powerVector = powers, verbose = 10)
+#Doc20
+sft_doc20_ep_responsive = pickSoftThreshold(datExpr_human_doc20_responsive, powerVector = powers, verbose = 10)
+sft_doc20_stromal_responsive = pickSoftThreshold(datExpr_mouse_doc20_responsive, powerVector = powers, verbose = 10)
+```
+
+
+```{r WGCNA networks}
+#Build adjacency tables and identify modules 
+adjacency_matrix_ep = adjacency(datExpr_human, power = sft_ep$powerEstimate)
+WGCNA_ep = blockwiseModules(datExpr_human, power = sft_ep$powerEstimate,maxBlockSize = 30000,corType = "bicor", mergeCutHeight = 0.20,numericLabels = TRUE, pamRespectsDendro = FALSE,
+saveTOMs = FALSE,verbose = 4,deepSplit = 3)
+adjacency_matrix_stromal = adjacency(datExpr_mouse, power = sft_stromal$powerEstimate)
+WGCNA_stromal = blockwiseModules(datExpr_mouse, power = sft_stromal$powerEstimate,maxBlockSize = 30000,corType = "bicor", mergeCutHeight = 0.20,numericLabels = TRUE, pamRespectsDendro = FALSE,
+saveTOMs = FALSE,verbose = 4,deepSplit = 3)
+
+#Carbo responsive
+adjacency_matrix_ep_carbo_response = adjacency(datExpr_human_carbo_responsive, power = sft_carbo_ep_responsive$powerEstimate)
+WGCNA_ep_carbo_response = blockwiseModules(datExpr_human_carbo_responsive, power = sft_carbo_ep_responsive$powerEstimate,maxBlockSize = 30000,corType = "bicor", mergeCutHeight = 0.20,numericLabels = TRUE, pamRespectsDendro = FALSE,
+saveTOMs = FALSE,verbose = 4,deepSplit = 3)
+
+adjacency_matrix_stromal_carbo_response = adjacency(datExpr_mouse_carbo_responsive, power = sft_carbo_stromal_responsive$powerEstimate)
+WGCNA_stromal_carbo_response = blockwiseModules(datExpr_mouse_carbo_responsive, power = sft_carbo_stromal_responsive$powerEstimate,maxBlockSize = 30000,corType = "bicor", mergeCutHeight = 0.20,numericLabels = TRUE, pamRespectsDendro = FALSE,
+saveTOMs = FALSE,verbose = 4,deepSplit = 3)
+
+#Doc20 responsive
+adjacency_matrix_ep_doc20_response = adjacency(datExpr_human_doc20_responsive, power = sft_doc20_ep_responsive$powerEstimate)
+WGCNA_ep_doc20_response = blockwiseModules(datExpr_human_doc20_responsive, power = sft_doc20_ep_responsive$powerEstimate,maxBlockSize = 30000,corType = "bicor", mergeCutHeight = 0.20,numericLabels = TRUE, pamRespectsDendro = FALSE,
+saveTOMs = FALSE,verbose = 4,deepSplit = 3)
+
+adjacency_matrix_stromal_doc20_response = adjacency(datExpr_mouse_doc20_responsive, power = sft_doc20_stromal_responsive$powerEstimate)
+WGCNA_stromal_doc20_response = blockwiseModules(datExpr_mouse_doc20_responsive, power = sft_doc20_stromal_responsive$powerEstimate,maxBlockSize = 30000,corType = "bicor", mergeCutHeight = 0.20,numericLabels = TRUE, pamRespectsDendro = FALSE,
+saveTOMs = FALSE,verbose = 4,destromalSplit = 3)
+```
+
+```{r prune graphs}
+#Delete weak edges(< 0.2)
+ig_ep_all = graph.adjacency(adjacency_matrix_ep,mode = "undirected",weighted = TRUE)
+ig_ep_all = simplify(ig_ep_all,remove.loops = TRUE)
+ig_ep_all = delete.edges(ig_ep_all, edges = which(abs(E(ig_ep_all)$weight) < 0.2))
+
+ig_stromal_all = graph.adjacency(adjacency_matrix_stromal,mode = "undirected",weighted = TRUE)
+ig_stromal_all = simplify(ig_stromal_all, remove.loops = TRUE)
+ig_stromal_all = delete.edges(ig_stromal_all, edges = which(abs(E(ig_stromal_all)$weight) < 0.2))
+
+ig_ep_carbo_responsive = graph.adjacency(adjacency_matrix_ep_carbo_response,mode = "undirected",weighted = TRUE)
+ig_ep_carbo_responsive = simplify(ig_ep_carbo_responsive,remove.loops = TRUE)
+ig_ep_carbo_responsive = delete.edges(ig_ep_carbo_responsive, edges = which(abs(E(ig_ep_carbo_responsive)$weight) < 0.2))
+
+ig_stromal_carbo_responsive = graph.adjacency(adjacency_matrix_stromal_carbo_response,mode = "undirected",weighted = TRUE)
+ig_stromal_carbo_responsive = simplify(ig_stromal_carbo_responsive, remove.loops = TRUE)
+ig_stromal_carbo_responsive = delete.edges(ig_stromal_carbo_responsive, edges = which(abs(E(ig_stromal_carbo_responsive)$weight) < 0.2))
+
+ig_ep_doc20_responsive = graph.adjacency(adjacency_matrix_ep_doc20_response,mode = "undirected",weighted = TRUE)
+ig_ep_doc20_responsive = simplify(ig_ep_doc20_responsive,remove.loops = TRUE)
+ig_ep_doc20_responsive = delete.edges(ig_ep_doc20_responsive, edges = which(abs(E(ig_ep_doc20_responsive)$weight) < 0.2))
+
+ig_stromal_doc20_responsive = graph.adjacency(adjacency_matrix_stromal_doc20_response,mode = "undirected",weighted = TRUE)
+ig_stromal_doc20_responsive = simplify(ig_stromal_doc20_responsive, remove.loops = TRUE)
+ig_stromal_doc20_responsive = delete.edges(ig_stromal_doc20_responsive, edges = which(abs(E(ig_stromal_doc20_responsive)$weight) < 0.2))
+```
+
+```{r prune with naive pruning}
+#Here we are pruning graphs built from all samples by the responsive graphs
+ig_ep_pruned_carbo_responsive = graph.naivePruning(ig_ep_all,ig_ep_carbo_responsive)
+ig_ep_pruned_doc20_responsive = graph.naivePruning(ig_ep_all,ig_ep_doc20_responsive)
+ig_stromal_pruned_stromal_responsive = graph.naivePruning(ig_stromal_all,ig_stromal_carbo_responsive)
+ig_stromal_pruned_doc20_responsive = graph.naivePruning(ig_stromal_all,ig_stromal_doc20_responsive)
+```
+
+
+
+```{r call modules with WGCNA in pruned epithelial graphs}
+#Carbo Ep 
+adjacency_matrix_ep_carbo_pruned = get.adjacency(ig_ep_pruned_carbo_responsive, attr="weight")
+adjacency_matrix_ep_carbo_pruned = as.matrix(adjacency_matrix_ep_carbo_pruned)
+
+TOM_carbo_ep_carbo_pruned = TOMsimilarity(adjacency_matrix_ep_carbo_pruned)
+colnames(TOM_carbo_ep_carbo_pruned) = colnames(adjacency_matrix_ep_carbo_pruned)
+rownames(TOM_carbo_ep_carbo_pruned) = rownames(adjacency_matrix_ep_carbo_pruned)
+dissTOM_carbo_ep_carbo_pruned = 1-TOM_carbo_ep_carbo_pruned                                           
+geneTree_carbo_ep_carbo_pruned = hclust(as.dist(dissTOM_carbo_ep_carbo_pruned), method = "average")
+dynamicMods_carbo_ep_carbo_pruned = cutreeDynamic(dendro = geneTree_carbo_ep_carbo_pruned, distM = dissTOM_carbo_ep_carbo_pruned, deepSplit = 3)
+dynamicMods_carbo_ep_carbo_pruned_colors = labels2colors(dynamicMods_carbo_ep_carbo_pruned)
+
+ME_carbo_ep_pruned = moduleEigengenes(datExpr_human,colors = dynamicMods_carbo_ep_carbo_pruned_colors)
+ME_carbo_ep_pruned = mergeCloseModules(datExpr_human, dynamicMods_carbo_ep_carbo_pruned_colors, cutHeight = 0.20, verbose = 3)
+carbo_ep_pruned_color_genes = cbind(colnames(datExpr_human),ME_carbo_ep_pruned$colors)
+
+
+#Doc20 Ep 
+adjacency_matrix_ep_doc20_pruned = get.adjacency(ig_ep_pruned_doc20_responsive, attr="weight")
+adjacency_matrix_ep_doc20_pruned = as.matrix(adjacency_matrix_ep_doc20_pruned)
+
+
+TOM_doc20_ep_doc20_pruned = TOMsimilarity(adjacency_matrix_ep_doc20_pruned)
+colnames(TOM_doc20_ep_doc20_pruned) = colnames(adjacency_matrix_ep_doc20_pruned)
+rownames(TOM_doc20_ep_doc20_pruned) = rownames(adjacency_matrix_ep_doc20_pruned)
+dissTOM_doc20_ep_doc20_pruned = 1-TOM_doc20_ep_doc20_pruned                                           
+geneTree_doc20_ep_doc20_pruned = hclust(as.dist(dissTOM_doc20_ep_doc20_pruned), method = "average")
+dynamicMods_doc20_ep_doc20_pruned = cutreeDynamic(dendro = geneTree_doc20_ep_doc20_pruned, distM = dissTOM_doc20_ep_doc20_pruned, deepSplit = 3)
+dynamicMods_doc20_ep_doc20_pruned_colors = labels2colors(dynamicMods_doc20_ep_doc20_pruned)
+
+ME_doc20_ep_pruned = moduleEigengenes(datExpr_human,colors = dynamicMods_doc20_ep_doc20_pruned_colors)
+ME_doc20_ep_pruned = mergeCloseModules(datExpr_human, dynamicMods_doc20_ep_doc20_pruned_colors, cutHeight = 0.20, verbose = 3)
+doc20_ep_pruned_color_genes = cbind(colnames(datExpr_human),ME_doc20_ep_pruned$colors)
+```
+
+```{r call modules with WGCNA pruned stromal graphs}
+#Carbo stromal 
+adjacency_matrix_stromal_carbo_pruned = get.adjacency(ig_stromal_pruned_stromal_responsive, attr="weight")
+adjacency_matrix_stromal_carbo_pruned = as.matrix(adjacency_matrix_stromal_carbo_pruned)
+
+
+TOM_carbo_stromal_carbo_pruned = TOMsimilarity(adjacency_matrix_stromal_carbo_pruned)
+colnames(TOM_carbo_stromal_carbo_pruned) = colnames(adjacency_matrix_stromal_carbo_pruned)
+rownames(TOM_carbo_stromal_carbo_pruned) = rownames(adjacency_matrix_stromal_carbo_pruned)
+dissTOM_carbo_stromal_carbo_pruned = 1-TOM_carbo_stromal_carbo_pruned                                           
+geneTree_carbo_stromal_carbo_pruned = hclust(as.dist(dissTOM_carbo_stromal_carbo_pruned), method = "average")
+dynamicMods_carbo_stromal_carbo_pruned = cutreeDynamic(dendro = geneTree_carbo_stromal_carbo_pruned, distM = dissTOM_carbo_stromal_carbo_pruned, deepSplit = 3)
+dynamicMods_carbo_stromal_carbo_pruned_colors = labels2colors(dynamicMods_carbo_stromal_carbo_pruned)
+
+
+ME_carbo_stromal_pruned = moduleEigengenes(datExpr_mouse,colors = dynamicMods_carbo_stromal_carbo_pruned_colors)
+ME_carbo_stromal_pruned = mergeCloseModules(datExpr_mouse, dynamicMods_carbo_stromal_carbo_pruned_colors, cutHeight = 0.20, verbose = 3)
+carbo_stromal_pruned_color_genes = cbind(colnames(datExpr_mouse),ME_carbo_stromal_pruned$colors)
+
+
+#Doc20 stromal 
+adjacency_matrix_stromal_doc20_pruned = get.adjacency(ig_stromal_pruned_doc20_responsive, attr="weight")
+adjacency_matrix_stromal_doc20_pruned = as.matrix(adjacency_matrix_stromal_doc20_pruned)
+
+
+TOM_doc20_stromal_doc20_pruned = TOMsimilarity(adjacency_matrix_stromal_doc20_pruned)
+colnames(TOM_doc20_stromal_doc20_pruned) = colnames(adjacency_matrix_stromal_doc20_pruned)
+rownames(TOM_doc20_stromal_doc20_pruned) = rownames(adjacency_matrix_stromal_doc20_pruned)
+dissTOM_doc20_stromal_doc20_pruned = 1-TOM_doc20_stromal_doc20_pruned                                           
+geneTree_doc20_stromal_doc20_pruned = hclust(as.dist(dissTOM_doc20_stromal_doc20_pruned), method = "average")
+dynamicMods_doc20_stromal_doc20_pruned = cutreeDynamic(dendro = geneTree_doc20_stromal_doc20_pruned, distM = dissTOM_doc20_stromal_doc20_pruned, deepSplit = 3)
+dynamicMods_doc20_stromal_doc20_pruned_colors = labels2colors(dynamicMods_doc20_stromal_doc20_pruned)
+
+ME_doc20_stromal_pruned = moduleEigengenes(datExpr_mouse,colors = dynamicMods_doc20_stromal_doc20_pruned_colors)
+ME_doc20_stromal_pruned = mergeCloseModules(datExpr_mouse, dynamicMods_doc20_stromal_doc20_pruned_colors, cutHeight = 0.20, verbose = 3)
+doc20_stromal_pruned_color_genes = cbind(colnames(datExpr_mouse),ME_doc20_stromal_pruned$colors)
+```
+
+```{r write out adjacency graphs}
+write.csv(adjacency_matrix_ep_carbo_pruned,"graphcarboep_5000pruned02.csv")
+write.csv(adjacency_matrix_stromal_carbo_pruned,"graphcarbostromal_5000pruned02.csv")
+write.csv(adjacency_matrix_ep_doc20_pruned,"graphdoc20ep_5000pruned02.csv")
+write.csv(adjacency_matrix_stromal_doc20_pruned,"graphdoc20stromal_5000pruned02.csv")
+```
+
+
+```{r ME cor with response epithelial}
+#Cor with response
+#Carbo ep 
+ME_carbo_ep_pruned_ME = ME_carbo_ep_pruned$newMEs
+response_traits_cast = recast(response_quant, xeno ~ tx )
+rownames(response_traits_cast) = response_traits_cast$xeno
+response_traits_cast$xeno = NULL
+response_traits_cast = response_traits_cast[rownames(datExpr_human),]
+
+moduleTraitCor_carbo_ep = cor(ME_carbo_ep_pruned_ME, response_traits_cast[,1,drop = FALSE], use = "p")
+moduleTraitPvalue_carbo_ep = corPvalueStudent(moduleTraitCor_carbo_ep, 45)
+
+ME_doc20_ep_pruned_ME = ME_doc20_ep_pruned$newMEs
+response_traits_cast = recast(response_quant, xeno ~ tx )
+rownames(response_traits_cast) = response_traits_cast$xeno
+response_traits_cast$xeno = NULL
+response_traits_cast = response_traits_cast[rownames(datExpr_human),]
+
+moduleTraitCor_doc20_ep = cor(ME_doc20_ep_pruned_ME, response_traits_cast[,3,drop = FALSE], use = "p")
+moduleTraitPvalue_doc20_ep = corPvalueStudent(moduleTraitCor_doc20_ep, 45)
+
+
+
+
+
+```
+
+```{r ME cor with response stromal}
+#Cor with response
+#Carbo stromal 
+ME_carbo_stromal_pruned_ME = ME_carbo_stromal_pruned$newMEs
+
+moduleTraitCor_carbo_stromal = cor(ME_carbo_stromal_pruned_ME, response_traits_cast[,1,drop = FALSE], use = "p")
+moduleTraitPvalue_carbo_stromal = corPvalueStudent(moduleTraitCor_carbo_stromal, 45)
+
+ME_doc20_stromal_pruned_ME = ME_doc20_stromal_pruned$newMEs
+response_traits_cast = recast(response_quant, xeno ~ tx )
+rownames(response_traits_cast) = response_traits_cast$xeno
+response_traits_cast$xeno = NULL
+response_traits_cast = response_traits_cast[rownames(datExpr_human),]
+
+moduleTraitCor_doc20_stromal = cor(ME_doc20_stromal_pruned_ME, response_traits_cast[,3,drop = FALSE], use = "p")
+moduleTraitPvalue_doc20_stromal = corPvalueStudent(moduleTraitCor_doc20_stromal, 45)
+
+```
+
+```{r write_out_sig_modules}
+sig_module_carbo_ep = data.frame(moduleTraitCor_carbo_ep)
+sig_module_carbo_ep$M_color = rownames(sig_module_carbo_ep)
+write.table(sig_module_carbo_ep,"sig_module_carbo_ep.txt")
+
+
+sig_module_carbo_stromal = data.frame(moduleTraitCor_carbo_stromal)
+sig_module_carbo_stromal$M_color = rownames(sig_module_carbo_stromal)
+write.table(sig_module_carbo_stromal,"sig_module_carbo_stromal.txt")
+
+sig_module_doc20_ep = data.frame(moduleTraitCor_doc20_ep)
+sig_module_doc20_ep$M_color = rownames(sig_module_doc20_ep)
+write.table(sig_module_doc20_ep,"sig_module_doc20_ep.txt")
+
+
+sig_module_doc20_stromal = data.frame(moduleTraitCor_doc20_stromal)
+sig_module_doc20_stromal$M_color = rownames(sig_module_doc20_stromal)
+write.table(sig_module_doc20_stromal,"sig_module_doc20_stromal.txt")
+
+
+```
+
+```{r write out the log2 UQ top 5,000 values}
+write.table(xenome_human_RSEM,"xenome_human_RSEM_log2_5000_var.txt",sep = "\t")
+write.table(xenome_mouse_RSEM,"xenome_mouse_RSEM_log2_5000_var.txt",sep = "\t")
+```
+
+```{r write out gene/module association}
+write.table(carbo_ep_pruned_color_genes,"carbo_5000_0.2_ep_modules.txt")
+write.table(doc20_ep_pruned_color_genes,"doc20_5000_0.2_ep_modules.txt")
+write.table(carbo_stromal_pruned_color_genes,"carbo_5000_0.2_stromal_modules.txt")
+write.table(doc20_stromal_pruned_color_genes,"doc20_5000_0.2_stromal_modules.txt")
+```
+
+
+```{r hub genes}
+#significantly modules |cor| > 0.35 p-value < 0.05 
+#For each of these find the hub genes 
+geneModuleMembershipHuman_carbo = as.data.frame(cor(datExpr_human,ME_carbo_ep_pruned_ME,use = "p"))
+geneTraitSignificanceHuman_carbo = as.data.frame(cor(datExpr_human, response_traits_cast[,1,drop = FALSE], use = "p"))
+geneModuleMembershipHuman_doc20 = as.data.frame(cor(datExpr_human,ME_doc20_ep_pruned_ME,use = "p"))
+geneTraitSignificanceHuman_doc20 = as.data.frame(cor(datExpr_human, response_traits_cast[,3,drop = FALSE], use = "p"))
+
+geneModuleMembershipmouse_carbo = as.data.frame(cor(datExpr_mouse,ME_carbo_stromal_pruned_ME,use = "p"))
+geneTraitSignificancemouse_carbo = as.data.frame(cor(datExpr_mouse, response_traits_cast[,1,drop = FALSE], use = "p"))
+geneModuleMembershipmouse_doc20 = as.data.frame(cor(datExpr_mouse,ME_doc20_stromal_pruned_ME,use = "p"))
+geneTraitSignificancemouse_doc20 = as.data.frame(cor(datExpr_mouse, response_traits_cast[,3,drop = FALSE], use = "p"))
+
+####Carbo-epithelial 
+carbo_info_modules_ep = c("MEdarkred","MEdarkgreen","MEskyblue3")
+doc20_info_modules_ep = c("MEbrown4","MEgreen","MEthistle2","MEdarkseagreen4","MElavenderblush3","MElightsteelblue1","MEsalmon")
+carbo_info_modules_stromal = c("MEmediumpurple2")
+doc20_info_modules_stromal = c("MEdarkgreen","MEpalevioletred2")
+
+carbo_ep_pruned_color_genes = as.data.frame(carbo_ep_pruned_color_genes)
+doc20_ep_pruned_color_genes = as.data.frame(doc20_ep_pruned_color_genes)
+carbo_stromal_pruned_color_genes = as.data.frame(carbo_stromal_pruned_color_genes)
+doc20_stromal_pruned_color_genes = as.data.frame(doc20_stromal_pruned_color_genes)
+
+
+
+hub_genes_carbo_ep = list()
+for (i in 1:length(carbo_info_modules_ep)){
+  module_name = carbo_info_modules_ep[[i]]
+  module_name = gsub("ME","",module_name)
+  genes = carbo_ep_pruned_color_genes[carbo_ep_pruned_color_genes$V2 == module_name,]
+  genes = as.character(genes$V1)
+  x = geneModuleMembershipHuman_carbo[genes,carbo_info_modules_ep[[i]],drop = FALSE]
+  colnames(x) = "MM"
+  x = x[abs(x$MM) > 0.75,, drop = FALSE ]
+  x = rownames(x)
+  y = geneTraitSignificanceHuman_carbo[x,,drop = FALSE]
+  y = y[abs(y$Carbo) > 0.2,, drop = FALSE ]
+  y = rownames(y)
+  hub_genes_carbo_ep[[carbo_info_modules_ep[[i]]]] = y
+}
+
+hub_genes_doc20_ep = list()
+for (i in 1:length(doc20_info_modules_ep)){
+  module_name = doc20_info_modules_ep[[i]]
+  module_name = gsub("ME","",module_name)
+  genes = doc20_ep_pruned_color_genes[doc20_ep_pruned_color_genes$V2 == module_name,]
+  genes = as.character(genes$V1)
+  x = geneModuleMembershipHuman_doc20[genes,doc20_info_modules_ep[[i]],drop = FALSE]
+  colnames(x) = "MM"
+  x = x[abs(x$MM) > 0.75,, drop = FALSE ]
+  x = rownames(x)
+  y = geneTraitSignificanceHuman_doc20[x,,drop = FALSE]
+  y = y[abs(y$Doc20) > 0.2,, drop = FALSE ]
+  y = rownames(y)
+  hub_genes_doc20_ep[[doc20_info_modules_ep[[i]]]] = y
+}
+
+hub_genes_carbo_stromal = list()
+for (i in 1:length(carbo_info_modules_stromal)){
+  module_name = carbo_info_modules_stromal[[i]]
+  module_name = gsub("ME","",module_name)
+  genes = carbo_stromal_pruned_color_genes[carbo_stromal_pruned_color_genes$V2 == module_name,]
+  genes = as.character(genes$V1)
+  x = geneModuleMembershipmouse_carbo[genes,carbo_info_modules_stromal[[i]],drop = FALSE]
+  colnames(x) = "MM"
+  x = x[abs(x$MM) > 0.75,, drop = FALSE ]
+  x = rownames(x)
+  y = geneTraitSignificancemouse_carbo[x,,drop = FALSE]
+  y = y[abs(y$Carbo) > 0.20,, drop = FALSE ]
+  y = rownames(y)
+  hub_genes_carbo_stromal[[carbo_info_modules_stromal[[i]]]] = y
+}
+
+hub_genes_doc20_stromal = list()
+for (i in 1:length(doc20_info_modules_stromal)){
+   module_name = doc20_info_modules_stromal[[i]]
+  module_name = gsub("ME","",module_name)
+  genes = doc20_stromal_pruned_color_genes[doc20_stromal_pruned_color_genes$V2 == module_name,]
+  genes = as.character(genes$V1)
+  x = geneModuleMembershipmouse_doc20[genes,doc20_info_modules_stromal[[i]],drop = FALSE]
+  colnames(x) = "MM"
+  x = x[abs(x$MM) > 0.75,, drop = FALSE ]
+  x = rownames(x)
+  y = geneTraitSignificancemouse_doc20[x,,drop = FALSE]
+  y = y[abs(y$Doc20) > 0.20,, drop = FALSE ]
+  y = rownames(y)
+  hub_genes_doc20_stromal[[doc20_info_modules_stromal[[i]]]] = y
+}
+
+
+hub_genes_carbo_ep_all_genes = unlist(hub_genes_carbo_ep)
+hub_genes_doc20_ep_all_genes = unlist(hub_genes_doc20_ep)
+hub_genes_carbo_stromal_all_genes = unlist(hub_genes_carbo_stromal)
+hub_genes_doc20_stromal_all_genes = unlist(hub_genes_doc20_stromal)
+````
+
+
+
+
