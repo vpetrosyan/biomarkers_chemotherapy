@@ -1,7 +1,6 @@
 ---
 title: "ctd_code_perms"
 output: html_document
-setwd("~/Documents/Github/chemotherapy_response_TNBC/publish")
 ---
 
 ```{r load libraries and functions}
