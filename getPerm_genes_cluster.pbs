@@ -1,0 +1,17 @@
+# Request 1 processors on 1 node
+#PBS -l nodes=1:ppn=1
+
+#Request x number of hours of walltime
+#PBS -l walltime=40:00:00
+
+#Request that regular output and terminal output go to the same file
+#PBS -j oe
+
+module load R/3.5
+cd /home/vpetrosyan/ctd_publish
+
+adj_matrix=${adj_matrix}
+module_genes=${module_genes}
+ind=${ind}
+
+Rscript getPermN_genes.R  $adj_matrix $module_genes $ind > getPerm$ind.out

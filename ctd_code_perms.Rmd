@@ -1,0 +1,204 @@
+---
+title: "ctd_code_perms"
+output: html_document
+setwd("~/Documents/Github/chemotherapy_response_TNBC/publish")
+---
+
+```{r load libraries and functions}
+library(huge)
+library(MASS)
+library(CTD)
+library(rjson)
+library(stringr)
+library(fs)
+library(igraph)
+library(argparser)
+library(qdapTools)
+
+
+lmp <- function (modelobject) {
+  if (class(modelobject) != "lm") stop("Not an object of class 'lm' ")
+  f <- summary(modelobject)$fstatistic
+  p <- pf(f[1],f[2],f[3],lower.tail=F)
+  attributes(p) <- NULL
+  return(p)
+}
+
+lm_to_funcs = function(model){
+  as.formula(
+    paste0("response_to_treatment ~ ", round(coefficients(model)[1],2), " + ", 
+           paste(sprintf("%.2f * %s", 
+                         coefficients(model)[-1],  
+                         names(coefficients(model)[-1])), 
+                 collapse=" + ")
+    )
+  )
+}
+```
+
+```{r define conditions}
+#Define the adjacency matrix, the genes in each module, and the expression data
+#stromal genes should be evaluated with the murine expression data and 
+#epithelial genes should be evaluated with the human expression data
+
+#Treatment can be doc20 or carbo
+treatment = "carbo"
+#Cell type can be stromal or ep(epithelial)
+cell_type  = "ep"
+#Xenome reads can be human or mouse 
+xenome_reads = "human"
+
+adj_matrix = paste("input/graph",treatment,cell_type,"_5000pruned02.csv", sep = "")
+module_genes = paste("input/",treatment,"_5000_0.2_",cell_type,"_modules.csv", sep = "")
+expression_df = paste("input/xenome_",xenome_reads,"_RSEM_log2_5000_var.txt",sep = "")
+
+```
+
+```{r define module genes and load adj matrix}
+module_df = read.csv(module_genes,header=TRUE)
+module_df = module_df[,-1]
+colnames(module_df) = c("genes","module")
+module_df$genes = tolower(module_df$genes)
+#Remove those in the grey module - unassigned by WGCNA 
+module_df = module_df[module_df$module != "grey",]
+
+adj_df = as.matrix(read.csv(adj_matrix,header=TRUE,row.names = 1))
+rownames(adj_df) = tolower(rownames(adj_df))
+colnames(adj_df) = tolower(colnames(adj_df))
+
+ig = graph.adjacency(adj_df, mode="undirected", weighted=TRUE, add.colnames="name")
+V(ig)$name = tolower(V(ig)$name)
+
+G = vector(mode="list", length=length(V(ig)$name))
+names(G) = V(ig)$name
+adj_mat = as.matrix(get.adjacency(ig, attr="weight"))
+
+p0=0.1
+p1=0.9
+thresholdDiff=0.01
+all_nodes = tolower(V(ig)$name)
+
+
+S_perturbed_nodes = unlist(module_df$genes)
+
+for (s_node in S_perturbed_nodes){
+  if (!(s_node %in% rownames(adj_mat))){
+    stop(paste('Node ', s_node, ' not in graph. Exiting program.'))
+  }}
+
+
+#Assign module names to numbers 
+colors = data.frame(unique(module_df$module))
+colnames(colors) = "module"
+colors$module_number = paste("module",seq(1:nrow(colors)),sep = "_")
+module_df = merge(module_df, colors, by =  "module")
+
+
+module_number = unique(module_df$module_number)
+
+#Break genes into modules
+modules_list = list()
+for(i in 1:length(module_number)){
+  number = module_number[[i]]
+  genes = module_df[module_df$module_number == number,"genes"]
+  modules_list[[number]] =  genes 
+}
+```
+
+```{r load ctd perms}
+#Run the permutations by start node on the cluster using the following scripts to 
+#identify highly connected subsets of genes
+#ctd_wrapper_cluster.R,getPerm_genes_cluster.pbs,getPermN_genes_cluster.R
+#Load in the permutation file 
+load(paste(treatment,cell_type,"-permutations_5000pruned02.RData",sep = ""))
+permutationByStartNode = lapply(permutationByStartNode, function(i) as.character(sapply(i, tolower)))
+```
+
+```{r linear regression with response}
+response_xeno = read.table("input/pdx_cohort_response.txt", header = TRUE)
+response_xeno$xeno = gsub("-","_",response_xeno$xeno)
+pdx_response = as.character(unique(response_xeno$xeno))
+response_quant = response_xeno[,c(1,2,4)]
+colnames(response_quant)[3] = "response_to_treatment"
+carbo_quant = response_quant[response_quant$tx == str_to_title(treatment),]
+
+expression_RSEM = read.table(expression_df)
+expression_RSEM$xeno = rownames(expression_RSEM)
+expression_RSEM = merge(carbo_quant,expression_RSEM, by = "xeno")
+rownames(expression_RSEM) = expression_RSEM$xeno
+rownames(expression_RSEM) = expression_RSEM$xeno
+expression_RSEM$xeno = NULL
+expression_RSEM$tx = NULL
+
+colnames(expression_RSEM) = tolower(colnames(expression_RSEM))
+
+set_lists = list()
+for ( i in 1:length(modules_list)){
+  number = names(modules_list)[[i]]
+  x = modules_list[[i]]
+  test = mle.getPtBSbyK(x[which(x %in% V(ig)$name)], permutationByStartNode,num.misses = NULL)
+  result = mle.getEncodingLength(test,NULL,"set1",G)
+  result$pvalue = (2^-(result$d.score-log2(length(x))))
+  max_D = max(result$d.score)
+  subset_max_D = result[result$d.score == max_D,,drop = FALSE]
+  print(nrow(subset_max_D))
+  if(nrow(subset_max_D) == 1){
+    subset_max_D_size = subset_max_D[,"subsetSize"]
+    connected_genes = test[[subset_max_D_size]]
+    connected_genes = names(connected_genes)}
+  else{
+    print(number)
+    print("tie in connectedness")
+    subset_max_D_size = subset_max_D[1,"subsetSize"]
+    connected_genes = test[[subset_max_D_size]]
+    connected_genes = names(connected_genes)
+  }
+  if(length(connected_genes) <= nrow(expression_RSEM)){
+    xenome_connected = expression_RSEM[,c("response_to_treatment",connected_genes)]
+    lr_test = lm(response_to_treatment~.,data = xenome_connected)
+    p = lmp(lr_test)
+    if(p < 0.05){
+      print(number)
+      print("pvalue_lr")
+      print(p)
+      print("pvalues_connectedness")
+      print(subset_max_D$pvalue)}
+  }
+  else{
+    print("set is too large")
+  }
+  set_lists[[number]] = list(test = test, result = result,genes = connected_genes, lr = lr_test,pvalue = p,all_genes_in_module = x)}
+
+
+modules_CTD = data.frame()
+for (i in 1:length(set_lists)){
+  df = data.frame(set_lists[[i]]$genes)
+  df$number =  names(set_lists)[[i]]
+  modules_CTD = rbind(modules_CTD,df)}
+
+colnames(modules_CTD) = c("genes","sub-modules")
+
+modules_CTD_pvalue = list()
+for (i in 1:length(set_lists)){
+  color = names(set_lists)[[i]]
+  print(color)
+  p = set_lists[[i]]$pvalue
+  modules_CTD_pvalue[[color]] = p
+}
+
+modules_CTD_pvalue = list2df(modules_CTD_pvalue)
+colnames(modules_CTD_pvalue) = c("pvalue","sub-modules")
+
+#For modules that are significantly associated with response identify informative genes 
+#Examples
+summary(set_lists$module_5$lr)
+summary(set_lists$module_23$lr)
+summary(set_lists$module_11$lr)
+
+info_genes_carboplatin_ep = c("MSI1","TMSB15A","ARHGDIB","GGT1","SV2A")
+info_genes_carboplatin_stromal = c("SEC14L2","SERPINI1","ADAMTS20","DGKQ")
+info_genes_doc20_ep = c("ITGA7","MAGED4","CERS1","ST8SIA2")
+info_genes_doc20_stromal = c("KIF24","PARPBP")
+```
+
+
