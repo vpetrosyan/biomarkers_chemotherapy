@@ -1,0 +1,156 @@
+---
+title: "mutation_PDX"
+output: html_document
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r libraries}
+library(tidyverse)
+library(ggplot2)
+library(kableExtra)
+library(gplots)
+library(reshape2)
+library(plyr)
+library(stringr)
+library(dplyr)
+library(tidyr)
+library(GenVisR)
+```
+
+```{r load the annotation list}
+annotations = readRDS("input/annotation.rds")
+```
+
+```{r load data}
+muts_her = read.table("input/muts_her.txt")
+muts_er= read.table("input/muts_er.txt")
+muts_tnbc= read.table("input/muts_tnbc.txt")
+
+
+pdf("muts_er.pdf")
+ggplot(muts_er, aes(fill=source, y=prop, x=Gene)) + 
+    geom_bar(position="dodge", stat="identity")+ theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+dev.off()
+
+pdf("muts_TNBC.pdf")
+ggplot(muts_tnbc, aes(fill=source, y=prop, x=Gene)) + 
+    geom_bar(position="dodge", stat="identity") + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+dev.off()
+
+pdf("muts_her.pdf")
+ggplot(muts_her, aes(fill=source, y=prop, x=Gene)) + 
+    geom_bar(position="dodge", stat="identity")+ theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+dev.off()
+```
+
+
+
+
+```{r load specific PDX mutation data}
+tnbc_all = read.table("input/TNBC_PDX_BCM.txt",sep = "\t",header = TRUE)
+tnbc_all = tnbc_all[1:73,]
+tnbc = tnbc_all$PDX
+tnbc = gsub("_","-",tnbc)
+
+mut = read_tsv("input/mutation.tsv")
+muts_all  = dcast(mut,MODEL ~ EFF.GENE)
+models_no_mut = setdiff(tnbc,muts_all$MODEL)
+models_no_mut = models_no_mut[-1]
+muts_all[,c("MODEL","TP53", "BRCA1","BRCA2")]
+
+mut2 <- mut
+mut2_small = mut2[mut2$EFF.GENE %in% c("TP53", "BRCA1","BRCA2"),]
+mut2_small_binary = mut2_small[,c("MODEL","EFF.GENE")]
+mut2_small_binary <-mut2_small_binary  %>% distinct()
+mut2_small_binary_cast = dcast(mut2_small_binary, MODEL ~ EFF.GENE)
+mut2_small_binary_cast = mut2_small_binary_cast[mut2_small_binary_cast$MODEL %in% c(tnbc,"BCM-0002") ,]
+colnames(mut2_small_binary_cast
+         )[2:4] = paste("mut",colnames(mut2_small_binary_cast)[2:4], sep = "_")
+meta_mut = merge(meta,mut2_small_binary_cast, by = "MODEL", all = TRUE)
+meta_mut = meta_mut[,c(1,5:7,34:36)]
+
+colnames(mut2_small_binary_cast)[-1] = paste("bi",colnames(mut2_small_binary_cast)[-1],sep = "_")
+all_muts = merge(muts_all[muts_all$MODEL %in% c("BCM-0002",tnbc),c("MODEL","TP53", "BRCA1","BRCA2")],mut2_small_binary_cast, by = "MODEL",all = TRUE)
+models_no_mut_table = data.frame(models_no_mut)
+models_no_mut_table[,2:7]  = "No Data"
+colnames(models_no_mut_table) = colnames(all_muts)
+all_muts = rbind(all_muts,models_no_mut_table)
+
+all_muts$bi_mut_BRCA1[all_muts$bi_mut_BRCA1 %in% c("TP53","BRCA1","BRCA2")]<- "Mutation"
+all_muts$bi_mut_BRCA2[all_muts$bi_mut_BRCA2 %in% c("TP53","BRCA1","BRCA2")]<- "Mutation"
+all_muts$bi_mut_TP53[all_muts$bi_mut_TP53 %in% c("TP53","BRCA1","BRCA2")]<- "Mutation"
+
+write.table(all_muts,"all_muts.txt",sep = "\t")
+
+muts_all[,c("MODEL","TP53", "BRCA1","BRCA2")]
+
+
+pdx_muts_binary = mut2[,c("MODEL","EFF.GENE")]
+pdx_muts_binary = pdx_muts_binary[!pdx_muts_binary$EFF.GENE =="",]
+pdx_muts_binary = na.omit(pdx_muts_binary)
+pdx_muts_binary = pdx_muts_binary %>% distinct
+pdx_muts_binary = data.frame(table(pdx_muts_binary))
+pdx_muts_binary = dcast(pdx_muts_binary,MODEL ~ EFF.GENE)
+rownames(pdx_muts_binary) = pdx_muts_binary$MODEL
+pdx_muts_binary$MODEL = NULL
+pdx_muts_binary = data.frame(t(pdx_muts_binary))
+pdx_muts_binary$sum = rowSums(pdx_muts_binary)
+pdx_muts_binary_sum = pdx_muts_binary[,"sum",drop = FALSE]
+pdx_muts_binary_sum$gene = rownames(pdx_muts_binary_sum)
+pdx_muts_binary_sum$percent =pdx_muts_binary_sum$sum/83
+
+pdx_tnbc = annotations$pdx.tnbc
+pdx_tnbc = gsub("-",".",pdx_tnbc)
+pdx_muts_binary_tnbc = pdx_muts_binary[,colnames(pdx_muts_binary) %in% pdx_tnbc]
+pdx_muts_binary_tnbc$sum = rowSums(pdx_muts_binary_tnbc)
+pdx_muts_binary_tnbc_sum = pdx_muts_binary_tnbc[,"sum",drop = FALSE]
+pdx_muts_binary_tnbc_sum$gene = rownames(pdx_muts_binary_tnbc_sum)
+pdx_muts_binary_tnbc_sum$percent = pdx_muts_binary_tnbc_sum$sum/65
+```
+
+```{r waterfall plot}
+muts_tnbc_gene = read.table("input/muts_tnbc_gene.txt")
+muts_tnbc_gene = muts_tnbc_gene$x
+muts_all_pdx = read.table("input/mutations_pdx.txt")
+  
+pdx_waterfall = muts_all_pdx
+pdx_waterfall = pdx_waterfall[,c("MODEL","EFF.GENE","Most_Severe_Effect")]
+pdx_waterfall = pdx_waterfall[pdx_waterfall$EFF.GENE %in% muts_tnbc_gene, ]
+#Keep only the top mutated TCGA genes 
+colnames(pdx_waterfall) = c("sample", "gene", "variant_class")
+pdx_waterfall$variant_class[pdx_waterfall$variant_class == "Frameshift Mutation"]<-"frame_shift"
+pdx_waterfall$variant_class[pdx_waterfall$variant_class %in% c("In-frame Deletion (Conservative)","In-frame Deletion (Disruptive)","In-frame Insertion (Conservative)","In-frame Insertion (Disruptive)")]<-"indel_insert"
+pdx_waterfall$variant_class[pdx_waterfall$variant_class %in% c("Missense Variant")]<-"missense"
+pdx_waterfall$variant_class[pdx_waterfall$variant_class %in% c("Nonsense Mutation")]<-"nonsense"
+pdx_waterfall$variant_class[pdx_waterfall$variant_class %in% c("Splice Acceptor Variant","Splice Donor Variant")]<-"splice"
+
+pdf("pdx_all_waterfall_t.pdf")
+waterfall(pdx_waterfall,fileType = "Custom",variant_class_order = c("missense","nonsense","frame_shift","indel_insert","splice"))
+dev.off()
+
+
+
+#Just the TNBC 
+pdx_waterfall_tnbc = muts_all_pdx
+pdx_tnbc = gsub("\\.","-",pdx_tnbc )
+pdx_waterfall_tnbc = pdx_waterfall_tnbc[pdx_waterfall_tnbc$MODEL %in% gsub("\\.","-",pdx_tnbc ),]
+pdx_waterfall_tnbc = pdx_waterfall_tnbc[,c("MODEL","EFF.GENE","Most_Severe_Effect")]
+pdx_waterfall_tnbc = pdx_waterfall_tnbc[pdx_waterfall_tnbc$EFF.GENE %in% muts_tnbc_gene, ]
+#Keep only the top mutated TCGA genes 
+colnames(pdx_waterfall_tnbc) = c("sample", "gene", "variant_class")
+pdx_waterfall_tnbc$variant_class[pdx_waterfall_tnbc$variant_class == "Frameshift Mutation"]<-"frame_shift"
+pdx_waterfall_tnbc$variant_class[pdx_waterfall_tnbc$variant_class %in% c("In-frame Insertion (Conservative)")]<-"insertion_conserved"
+pdx_waterfall_tnbc$variant_class[pdx_waterfall_tnbc$variant_class %in% c("In-frame Deletion (Conservative)")]<-"indel_conserved"
+pdx_waterfall_tnbc$variant_class[pdx_waterfall_tnbc$variant_class %in% c("In-frame Deletion (Disruptive)")]<-"indel_disruptive"
+pdx_waterfall_tnbc$variant_class[pdx_waterfall_tnbc$variant_class %in% c("In-frame Insertion (Disruptive)")]<-"insertion_disruptive"
+pdx_waterfall_tnbc$variant_class[pdx_waterfall_tnbc$variant_class %in% c("Missense Variant")]<-"missense"
+pdx_waterfall_tnbc$variant_class[pdx_waterfall_tnbc$variant_class %in% c("Nonsense Mutation")]<-"nonsense"
+pdx_waterfall_tnbc$variant_class[pdx_waterfall_tnbc$variant_class %in% c("Splice Acceptor Variant","Splice Donor Variant")]<-"splice_site_variant"
+
+pdf("pdx_all_waterfall_tnbc.pdf")
+waterfall(pdx_waterfall_tnbc,fileType = "Custom",variant_class_order = c("missense","nonsense","frame_shift","indel_disruptive","insertion_disruptive","splice_site_variant","insertion_conserved","indel_conserved"))
+dev.off()
+```
+
