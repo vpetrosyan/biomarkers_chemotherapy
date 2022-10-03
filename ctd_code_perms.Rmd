@@ -109,7 +109,7 @@ for(i in 1:length(module_number)){
 #identify highly connected subsets of genes
 #ctd_wrapper_cluster.R,getPerm_genes_cluster.pbs,getPermN_genes_cluster.R
 #Load in the permutation file 
-load(paste(treatment,cell_type,"-permutations_5000pruned02.RData",sep = ""))
+load(paste(input/treatment,cell_type,"-permutations_5000pruned02.RData",sep = ""))
 permutationByStartNode = lapply(permutationByStartNode, function(i) as.character(sapply(i, tolower)))
 ```
 
