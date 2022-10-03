@@ -1,0 +1,6 @@
+"x"
+"1" "SEC14L2"
+"2" "SERPINI1"
+"3" "E130307A14RIK"
+"4" "ADAMTS20"
+"5" "DGKQ"

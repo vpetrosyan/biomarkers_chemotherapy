@@ -1,0 +1,81 @@
+PDX	ER-IHC	PR-IHC	HER2-IHC	BRCA1 	BRCA2	TP53				
+BCM_002	Negative	Negative	Negative			Mutation				
+BCM_0046	Negative	Negative	Negative			Mutation				
+BCM_0049	Negative	Negative	Negative	NA	NA	NA				
+BCM_0104	Negative	Negative	Negative			Mutation				
+BCM_0113	Negative	Negative	Negative			Mutation				
+BCM_0132	Negative	Negative	Negative			Mutation				
+BCM_15003	Negative	Negative	Negative			Mutation				
+BCM_15006	Negative	Negative	Negative			Mutation				
+BCM_15008	Negative	Negative	Negative			Mutation				
+BCM_15029	Negative	Negative	Negative			Mutation				
+BCM_15046	Negative	Negative	Negative			Mutation				
+BCM_15051	Negative	Negative	Negative			Mutation				
+BCM_15115	Negative	Negative	Negative			Mutation				
+BCM_2147	Negative	Negative	Negative			Mutation				
+BCM_2277	Negative	Negative	Negative			Mutation				
+BCM_2665	Negative	Negative	Negative			Mutation				
+BCM_3107	Negative	Negative	Negative	Mutation	Mutation	Mutation				
+BCM_3204	Negative	Negative	Negative	Mutation	Mutation	Mutation				
+BCM_3469	Negative	Negative	Negative			Mutation				
+BCM_3561	Negative	Negative	Negative			Mutation				
+BCM_3611	Negative	Negative	Negative	Mutation		Mutation				
+BCM_3807	Negative	Negative	Negative							
+BCM_3887	Negative	Negative	Negative	Mutation		Mutation				
+BCM_3904	Negative	Negative	Negative			Mutation				
+BCM_3936	Negative	Negative	Negative	Mutation		Mutation				
+BCM_4013	Negative	Negative	Negative			Mutation				
+BCM_4175	Negative	Negative	Negative			Mutation				
+BCM_4195	Negative	Negative	Negative			Mutation				
+BCM_4272	Negative	Negative	Negative		Mutation	Mutation				
+BCM_4400	Negative	Negative	Negative							
+BCM_4664	Negative	Negative	Negative			Mutation				
+BCM_4849	Negative	Negative	Negative			Mutation				
+BCM_4913	Negative	Negative	Negative	Mutation		Mutation				
+BCM_5156	Negative	Negative	Negative							
+BCM_5438	Negative	Negative	Negative	Mutation		Mutation				
+BCM_5471	Negative	Negative	Negative	Mutation						
+BCM_5998	Negative	Negative	Negative			Mutation				
+BCM_6257	Negative	Negative	Negative			Mutation				
+BCM_7482	Negative	Negative	Negative	Mutation		Mutation				
+BCM_7563	Negative	Negative	Negative							
+BCM_7649	Negative	Negative	Negative			Mutation				
+BCM_7821	Negative	Negative	Negative			Mutation				
+BCM_8563	Negative	Negative	Negative							
+BCM_9161	Negative	Negative	Negative	Mutation		Mutation				
+BRA45	Negative	Negative	Negative	NA	NA	NA				
+BRA70	Negative	Negative	Negative	NA	NA	NA				
+BRA74	Negative	Negative	Negative	NA	NA	NA				
+GUM07	Negative	Negative	Negative	NA	NA	NA				
+GUM13	Negative	Negative	Negative	NA	NA	NA				
+GUM17	Negative	Negative	Negative	NA	NA	NA				
+GUM30	Negative	Negative	Negative	NA	NA	NA				
+HCI_001	Negative	Negative	Negative		Mutation	Mutation				
+HCI_002	Negative	Negative	Negative			Mutation				
+HCI_009	Negative	Negative	Negative			Mutation				
+HCI_010	Negative	Negative	Negative	Mutation		Mutation				
+HCI_015	Negative	Negative	Negative		Mutation	Mutation				
+HCI_016	Negative	Negative	Negative	Mutation		Mutation				
+HCI_019	Negative	Negative	Negative		Mutation	Mutation				
+HCI_023	Negative	Negative	Negative			Mutation				
+HCI_024	Negative	Negative	Negative			Mutation				
+HCI_027	Negative	Negative	Negative			Mutation				
+HCI_028	Negative	Negative	Negative			Mutation				
+HCI_030	Negative	Negative	Negative	Mutation		Mutation				
+MC1	Negative	Negative	Negative	NA	NA	NA				
+WHIM12	Negative	Negative	Negative			Mutation				
+WHIM14	Negative	Negative	Negative			Mutation				
+WHIM2	Negative	Negative	Negative			Mutation				
+WHIM30	Negative	Negative	Negative		Mutation	Mutation				
+WHIM6	Negative	Negative	Negative			Mutation				
+WHIM68	Negative	Negative	Negative			Mutation				
+WHIM69	Negative	Negative	Negative							
+WHIM74	Negative	Negative	Negative			Mutation				
+WHIM75	Negative	Negative	Negative			Mutation				
+										
+										
+										
+										
+										
+										
+										
