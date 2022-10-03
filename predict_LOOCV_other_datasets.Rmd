@@ -1,0 +1,278 @@
+---
+title: "predict_other_datasets"
+output: html_document
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r libraries}
+library(tidyverse)
+library(ggplot2)
+library(kableExtra)
+library(gplots)
+library(reshape2)
+library(plyr)
+library(stringr)
+library(dplyr)
+library(tidyr)
+library(ModelMetrics)
+library(rsm)
+library(pROC)
+library(plotROC)
+library(pROC)
+```
+
+```{r load the docetaxel/carboplatin info genes}
+doc20_ep_info_genes = read.table("input/info_genes_doc20ep.txt")
+doc20_ep_info_genes = as.character(doc20_ep_info_genes$x)
+doc20_stromal_info_genes = read.table("input/info_genes_doc20stromal.txt")
+doc20_stromal_info_genes = as.character(doc20_stromal_info_genes$x)
+
+carbo_ep_info_genes = read.table("input/info_genes_carboep.txt")
+carbo_ep_info_genes = as.character(carbo_ep_info_genes$x)
+carbo_stromal_info_genes = read.table("input/info_genes_carbostromal.txt")
+carbo_stromal_info_genes = as.character(carbo_stromal_info_genes$x)
+#remove "E130307A14RIK" as it has no human homolog
+carbo_stromal_info_genes = carbo_stromal_info_genes[!carbo_stromal_info_genes %in%  "E130307A14RIK"]
+```
+
+####RNA-seq datasets
+
+```{r GSE142767}
+GSE142767_response_both = read.table("input/GSE142767_response_both.txt")
+GSE142767_response_cis = GSE142767_response_both[,"Cisplatin_RECIST",drop = FALSE]
+GSE142767_response_pac = GSE142767_response_both[,"Paclitaxel_RECIST",drop = FALSE]
+GSE142767_response_cis$PDX = rownames(GSE142767_response_cis)
+GSE142767_response_pac$PDX = rownames(GSE142767_response_pac)
+
+
+#30 overall samples 
+GSE142767 = read.table("input/GSE142767_log2UQ.txt")
+GSE142767 = data.frame(t(GSE142767))
+GSE142767$PDX = rownames(GSE142767)
+GSE142767_exp_cis = GSE142767[,colnames(GSE142767) %in% c("PDX",carbo_ep_info_genes,carbo_stromal_info_genes)]
+GSE142767_exp_pac = GSE142767[,colnames(GSE142767) %in% c("PDX",doc20_ep_info_genes,doc20_stromal_info_genes)]
+
+#Add the response
+GSE142767_response_cis = merge(GSE142767_response_cis,GSE142767_exp_cis, by = "PDX")
+GSE142767_response_pac = merge(GSE142767_response_pac,GSE142767_exp_pac, by = "PDX")
+
+responsive = c("CR","PR")
+resistant = c("PD","SD")
+
+GSE142767_response_cis$Cisplatin_RECIST = as.character(GSE142767_response_cis$Cisplatin_RECIST)
+GSE142767_response_cis$Cisplatin_RECIST_crpr[GSE142767_response_cis$Cisplatin_RECIST %in% responsive] <-"responsive"
+GSE142767_response_cis$Cisplatin_RECIST_crpr[GSE142767_response_cis$Cisplatin_RECIST %in% resistant] <- "resistant"
+GSE142767_response_cis$Cisplatin_RECIST_cr[GSE142767_response_cis$Cisplatin_RECIST == "CR"] <-"CR"
+GSE142767_response_cis$Cisplatin_RECIST_cr[GSE142767_response_cis$Cisplatin_RECIST != "CR"] <-"nCR"
+
+GSE142767_response_cis_loocv_crpr = GSE142767_response_cis[,c(3:11,12)]
+GSE142767_response_cis_loocv_crpr$Cisplatin_RECIST_crpr = as.factor(GSE142767_response_cis_loocv_crpr$Cisplatin_RECIST_crpr)
+
+ctrl_LOOCV = trainControl(method="LOOCV",
+                     summaryFunction=twoClassSummary, 
+                     classProbs=T,
+                     savePredictions = "final")
+
+set.seed(12345)
+fit_GSE142767_response_cis_loocv_crpr <- train(Cisplatin_RECIST_crpr ~ .,  
+  data = GSE142767_response_cis_loocv_crpr,
+  trControl =  ctrl_LOOCV,preProc=c("scale","center"),
+  method = "xgbTree",metric = "ROC")
+
+roc(fit_GSE142767_response_cis_loocv_crpr$pred$obs,fit_GSE142767_response_cis_loocv_crpr$pred$responsive)
+
+GSE142767_response_cis_loocv_cr = GSE142767_response_cis[,c(3:11,13)]
+GSE142767_response_cis_loocv_cr$Cisplatin_RECIST_cr = as.factor(GSE142767_response_cis_loocv_cr$Cisplatin_RECIST_cr)
+
+set.seed(12345)
+fit_GSE142767_response_cis_loocv_cr <- train(Cisplatin_RECIST_cr ~ .,  
+  data = GSE142767_response_cis_loocv_cr,
+  trControl =  ctrl_LOOCV,preProc=c("scale","center"),
+  method = "xgbTree",metric = "ROC")
+
+roc(fit_GSE142767_response_cis_loocv_cr$pred$obs,fit_GSE142767_response_cis_loocv_cr$pred$CR)
+
+
+GSE142767_response_pac$Paclitaxel_RECIST = as.character(GSE142767_response_pac$Paclitaxel_RECIST)
+GSE142767_response_pac$Paclitaxel_RECIST_crpr[GSE142767_response_pac$Paclitaxel_RECIST %in% responsive] <-"responsive"
+GSE142767_response_pac$Paclitaxel_RECIST_crpr[GSE142767_response_pac$Paclitaxel_RECIST %in% resistant] <- "resistant"
+GSE142767_response_pac$Paclitaxel_RECIST_cr[GSE142767_response_pac$Paclitaxel_RECIST == "CR"] <-"CR"
+GSE142767_response_pac$Paclitaxel_RECIST_cr[GSE142767_response_pac$Paclitaxel_RECIST != "CR"] <-"nCR"
+GSE142767_response_pac_loocv_crpr = GSE142767_response_pac[,c(3:9)]
+
+set.seed(2345)
+fit_GSE142767_response_pac_loocv_crpr <- train(Paclitaxel_RECIST_crpr ~ .,  
+  data = GSE142767_response_pac_loocv_crpr,
+  trControl =  ctrl_LOOCV,preProc=c("scale","center"),
+  method = "xgbTree",metric = "ROC")
+
+roc(fit_GSE142767_response_pac_loocv_crpr$pred$obs,fit_GSE142767_response_pac_loocv_crpr$pred$responsive)
+
+GSE142767_response_pac_loocv_cr = GSE142767_response_pac[,c(3:8,10)]
+GSE142767_response_pac_loocv_cr$Paclitaxel_RECIST_cr = as.factor(GSE142767_response_pac_loocv_cr$Paclitaxel_RECIST_cr)
+
+set.seed(2345)
+fit_GSE142767_response_pac_loocv_cr <- train(Paclitaxel_RECIST_cr ~ .,  
+  data = GSE142767_response_pac_loocv_cr,
+  trControl =  ctrl_LOOCV,preProc=c("scale","center"),
+  method = "xgbTree",metric = "ROC")
+
+roc(fit_GSE142767_response_pac_loocv_cr$pred$obs,fit_GSE142767_response_pac_loocv_cr$pred$CR)
+```
+
+
+```{r plot curves RMGCRC}
+fit_GSE142767_cis_loocv_cr_df = fit_GSE142767_response_cis_loocv_cr$pred
+fit_GSE142767_cis_loocv_cr_df = fit_GSE142767_cis_loocv_cr_df[,c("obs","nCR")]
+fit_GSE142767_cis_loocv_cr_df$name = "cisplatin_cr"
+colnames(fit_GSE142767_cis_loocv_cr_df)[1:2]<- c("D","M")
+
+
+fit_GSE142767_response_pac_loocv_cr_df = fit_GSE142767_response_pac_loocv_cr$pred
+fit_GSE142767_response_pac_loocv_cr_df = fit_GSE142767_response_pac_loocv_cr_df[,c("obs","nCR")]
+fit_GSE142767_response_pac_loocv_cr_df$name = "paclitaxel_cr"
+colnames(fit_GSE142767_response_pac_loocv_cr_df)[1:2]<- c("D","M")
+
+fit_GSE142767_loocv = rbind(fit_GSE142767_cis_loocv_cr_df,fit_GSE142767_response_pac_loocv_cr_df)
+
+
+pdf("ROC_CR_RMGCRC_Loocv.pdf")
+ggplot(fit_GSE142767_loocv, aes(d = D, m = M, color = name)) + geom_roc(labelsize = 5) + style_roc(theme = theme_grey()) +  theme(text = element_text(size=10)) + ggtitle("ROC CR") + theme(plot.title = element_text(hjust = 0.5))
+dev.off()
+
+
+
+fit_GSE142767_cis_loocv_crpr_df = fit_GSE142767_response_cis_loocv_crpr$pred
+fit_GSE142767_cis_loocv_crpr_df = fit_GSE142767_cis_loocv_crpr_df[,c("obs","responsive")]
+fit_GSE142767_cis_loocv_crpr_df$name = "cisplatin_crpr"
+colnames(fit_GSE142767_cis_loocv_crpr_df)[1:2]<- c("D","M")
+
+fit_GSE142767_response_pac_loocv_crpr_df = fit_GSE142767_response_pac_loocv_crpr$pred
+fit_GSE142767_response_pac_loocv_crpr_df = fit_GSE142767_response_pac_loocv_crpr_df[,c("obs","responsive")]
+fit_GSE142767_response_pac_loocv_crpr_df$name = "paclitaxel_crpr"
+colnames(fit_GSE142767_response_pac_loocv_crpr_df)[1:2]<- c("D","M")
+
+fit_GSE142767_loocv_crpr = rbind(fit_GSE142767_cis_loocv_crpr_df,fit_GSE142767_response_pac_loocv_crpr_df)
+
+
+pdf("ROC_crpr_RMGCRCC_Loocv.pdf")
+ggplot(fit_GSE142767_loocv_crpr, aes(d = D, m = M, color = name)) + geom_roc(labelsize = 5) + style_roc(theme = theme_grey()) +  theme(text = element_text(size=10)) + ggtitle("ROC crpr") + theme(plot.title = element_text(hjust = 0.5))
+dev.off()
+
+```
+
+
+```{r brightness and plot curves}
+#GSE164458
+GSE164458_response = read.table("input/GSE164458_sample_anno.txt",header = TRUE)
+GSE164458_response = GSE164458_response[GSE164458_response$Arm == "C",]
+#123
+GSE164458_rna = read.table("input/GSE164458_BrighTNess_RNAseq_log2_Processed_ASTOR.txt",header = TRUE)
+GSE164458_rna = data.frame(t(GSE164458_rna))
+rownames(GSE164458_rna) = gsub("X","",rownames(GSE164458_rna) )
+
+GSE164458_rna = GSE164458_rna[rownames(GSE164458_rna) %in% GSE164458_response$Sample,]
+GSE164458_rna = data.frame(t(GSE164458_rna))
+GSE164458_rna  = GSE164458_rna[rownames(GSE164458_rna) %in% c(doc20_ep_info_genes, doc20_stromal_info_genes),]
+GSE164458_rna = data.frame(t(GSE164458_rna))
+GSE164458_rna$Sample = rownames(GSE164458_rna)
+GSE164458_rna$Sample = gsub("X","",GSE164458_rna$Sample)
+GSE164458_rna_response = merge(GSE164458_rna,GSE164458_response[c(1,3)], by = "Sample")
+rownames(GSE164458_rna_response) = GSE164458_rna_response$Sample
+GSE164458_rna_response$Sample = NULL
+
+set.seed(2345)
+
+GSE164458_rna_response_df = GSE164458_rna_response[, -8]
+
+fit_GSE164458_doc_loocv_cr <- train(Response ~ .,  
+  data = GSE164458_rna_response_df,
+  trControl =  ctrl_LOOCV,preProc=c("scale","center"),
+  method = "xgbTree",metric = "ROC")
+
+roc(fit_GSE164458_doc_loocv_cr$pred$obs,fit_GSE164458_doc_loocv_cr$pred$pCR)
+
+pdf("Brightness_XGBtree_ROC_doc20doc30.pdf")
+ggplot(fit_GSE164458_doc_loocv_cr$pred, aes(d = obs, m = RD)) + geom_roc(labelsize = 5) + style_roc(theme = theme_grey()) +  theme(text = element_text(size=10)) + ggtitle("ROC patient Array") + theme(plot.title = element_text(hjust = 0.5))
+dev.off()
+
+```
+
+###Arrays datasets
+
+```{r curie load the response and the data set }
+response_curie = read.csv("input/curie_response_pred.csv", header = TRUE)
+response_curie$Sample = as.character(response_curie$Sample)
+response_curie$response = as.character(response_curie$response)
+response_curie$response
+
+curie = read.csv("input/curie_data_set.csv")
+curie =  aggregate(curie, by = list(curie$Gene_Symbol),FUN = mean)
+rownames(curie) = curie$Group.1
+curie$Group.1 = NULL
+curie$Gene_Symbol = NULL
+curie = data.frame(t(curie))
+
+response_curie_and_data = intersect(response_curie$Sample,rownames(curie))
+response_curie = response_curie[response_curie$Sample %in% response_curie_and_data,]
+curie = curie[response_curie_and_data,]
+curie_carbo = curie[,c(carbo_ep_info_genes,carbo_stromal_info_genes)]
+
+responsive = c("responder")
+resistant = c("resistant","Resistant")
+
+
+"%notin%" <- Negate("%in%")
+response_curie$response[response_curie$response %notin% responsive] <-"resistant"
+
+curie_carbo$Sample = rownames(curie_carbo)
+curie_carbo = merge(curie_carbo,response_curie, by = "Sample")
+rownames(curie_carbo) = curie_carbo$Sample
+curie_carbo$Sample = NULL
+
+
+ctrl_LOOCV = trainControl(method="LOOCV",
+                     summaryFunction=twoClassSummary, 
+                     classProbs=T,
+                     savePredictions = "final")
+
+set.seed(2345)
+
+fit_carbo_curie <- train(response ~ .,  
+  data = curie_carbo,
+  trControl =  ctrl_LOOCV,preProc=c("scale","center"),
+  method = "xgbTree",metric = "ROC")
+
+roc(fit_carbo_curie$pred$obs,fit_carbo_curie$pred$responder)
+
+
+pdf("Curie_XGBtree_ROC.pdf")
+ggplot(fit_carbo_curie$pred, aes(d = obs, m = responder)) + geom_roc(labelsize = 5) + style_roc(theme = theme_grey()) +  theme(text = element_text(size=10)) + ggtitle("ROC Curie Array") + theme(plot.title = element_text(hjust = 0.5))
+dev.off()
+```
+
+```{r DFCI }
+GSE18864 = read.table("input/GSE18864_response.txt",sep = "\t")
+
+
+set.seed(12345)
+
+fit_carbo_patient <- train(response ~ .,  
+  data = GSE18864,
+  trControl =  ctrl_LOOCV,preProc=c("scale","center"),
+  method = "xgbTree",metric = "ROC")
+
+roc(fit_carbo_patient$pred$obs,fit_carbo_patient$pred$responsive)
+
+pdf("patient_XGBtree_ROC.pdf")
+ggplot(fit_carbo_patient$pred, aes(d = obs, m = responsive)) + geom_roc(labelsize = 5) + style_roc(theme = theme_grey()) +  theme(text = element_text(size=10)) + ggtitle("ROC patient Array") + theme(plot.title = element_text(hjust = 0.5))
+dev.off()
+
+
+
+```
+
+
+
