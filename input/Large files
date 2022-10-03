@@ -1,0 +1,15 @@
+Some files are too large to be stored in a github repository. Files larger than 50 mb can be found here:
+https://bcm.box.com/s/546rwvlu09u72m94tom79y3uby8oefyx
+
+The following files are located in this box folder:
+graphcarboep_5000pruned02.csv
+graphdoc20ep_5000pruned02.csv
+graphcarbostromal_5000pruned02.csv
+graphdoc20stromal_5000pruned02.csv
+carboep-permutations_5000pruned02.RData
+doc20ep-permutations_5000pruned02.RData
+carbostromal-permutations_5000pruned02.RData
+doc20stromal-permutations_5000pruned02.RData
+GSE164458_BrighTNess_RNAseq_log2_Processed_ASTOR
+mutation.tsv
+
